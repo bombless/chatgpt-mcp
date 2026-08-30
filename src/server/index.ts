@@ -45,13 +45,14 @@ function buildMcpServer() {
 }
 
 const app = express(); app.disable('x-powered-by'); app.use(express.json({ limit: '2mb' }));
-app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
-app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
-app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
-app.post('/oauth/register', (req, res) => { try { res.status(201).json(registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
-app.get('/oauth/authorize', (req, res) => { const result = authorizationPage(req); res.status(result.status).type('html').send(result.body); });
-app.post('/oauth/authorize/approve', (req, res) => { const result = approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
-app.post('/oauth/token', (req, res) => { try { res.json(exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
+app.use((req, _res, next) => { console.log(`[http] ${req.method} ${req.url} from ${req.socket.remoteAddress}`); next(); });
+app.get('/healthz', (_req, res) => { console.log('[http] GET /healthz'); res.json({ ok: true, agents: registry.list() }); });
+app.get('/.well-known/oauth-authorization-server', (_req, res) => { console.log('[oauth] GET /.well-known/oauth-authorization-server'); res.json(oauthMetadata()); });
+app.get('/.well-known/oauth-protected-resource', (_req, res) => { console.log('[oauth] GET /.well-known/oauth-protected-resource'); res.json(protectedResourceMetadata()); });
+app.post('/oauth/register', (req, res) => { console.log('[oauth] POST /oauth/register body:', JSON.stringify(req.body)); try { const result = registerClient(req.body); console.log('[oauth] registered client:', result.client_id); res.status(201).json(result); } catch (e) { console.error('[oauth] register failed:', e); res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
+app.get('/oauth/authorize', (req, res) => { console.log('[oauth] GET /oauth/authorize query:', JSON.stringify(req.query)); const result = authorizationPage(req); console.log('[oauth] authorize page status:', result.status); res.status(result.status).type('html').send(result.body); });
+app.post('/oauth/authorize/approve', (req, res) => { console.log('[oauth] POST /oauth/authorize/approve query:', JSON.stringify(req.query)); const result = approve(req); if (result.location) { console.log('[oauth] approved, redirecting to:', result.location); return res.redirect(302, result.location); } console.error('[oauth] approve failed:', result.status, result.body); return res.status(result.status).send(result.body); });
+app.post('/oauth/token', (req, res) => { console.log('[oauth] POST /oauth/token grant_type:', req.body?.grant_type, 'client_id:', req.body?.client_id); try { const result = exchangeToken(req.body); console.log('[oauth] token issued, access_token prefix:', result.access_token.slice(0, 8) + '...'); res.json(result); } catch (e) { const error = String(e instanceof Error ? e.message : e); console.error('[oauth] token exchange failed:', error); res.status(400).json({ error }); } });
 app.get('/agents', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); res.json({ agents: registry.list() }); });
 
 // Caddy sets X-From-Caddy on public reverse-proxied requests. The admin UI is only
@@ -69,7 +70,13 @@ app.get('/', (req, res) => {
 app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({error:'tool not allowed in admin UI'}); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ok:true,result}); } catch (e) { res.status(500).json({ok:false,error:String(e instanceof Error?e.message:e)}); } });
 
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
-app.all('/mcp', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); return mcpHandler(req, res); });
+app.all('/mcp', (req, res) => {
+  const token = bearer(req);
+  const authorized = mcpAuthorized(req);
+  console.log(`[mcp] ${req.method} /mcp token_present: ${!!token} authorized: ${authorized}`);
+  if (!authorized) { console.log('[mcp] returning 401 unauthorized'); return mcpUnauthorized(res); }
+  return mcpHandler(req, res);
+});
 const httpServer = createHttpServer(app); const wss = new WebSocketServer({ noServer: true });
 httpServer.on('upgrade', (req, socket, head) => { if (req.url !== '/agent') return socket.destroy(); if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; } wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)); });
 wss.on('connection', ws => { let agentId: string | undefined; let initialized = false; ws.on('message', raw => { try { const message = JSON.parse(raw.toString()) as AgentMessage; if (message.type === 'hello') { if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId'); agentId = message.agentId; initialized = true; registry.add(agentId, ws); console.log(`[agent] connected ${agentId} (${message.hostname})`); return; } if (!initialized) return ws.close(4003, 'hello required'); registry.handleMessage(message); } catch { ws.close(4004, 'invalid message'); } }); ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); }); });

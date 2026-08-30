@@ -41,12 +41,14 @@ export function protectedResourceMetadata() {
 }
 
 export function registerClient(body: any) {
+  console.log('[oauth] registerClient called, redirect_uris:', body?.redirect_uris);
   if (!Array.isArray(body?.redirect_uris) || body.redirect_uris.length === 0) throw new Error('redirect_uris is required');
   for (const uri of body.redirect_uris) {
     if (typeof uri !== 'string' || !/^https?:\/\//.test(uri)) throw new Error('redirect_uris must contain http(s) URLs');
   }
   const clientId = random(24);
   clients.set(clientId, { clientId, redirectUris: body.redirect_uris, clientName: body.client_name });
+  console.log('[oauth] client registered:', clientId, 'name:', body.client_name);
   return { client_id: clientId, client_name: body.client_name ?? 'MCP Client', redirect_uris: body.redirect_uris, token_endpoint_auth_method: 'none' };
 }
 
@@ -56,8 +58,10 @@ export function authorizationPage(req: Request) {
   const state = String(req.query.state ?? '');
   const codeChallenge = req.query.code_challenge ? String(req.query.code_challenge) : undefined;
   const responseType = String(req.query.response_type ?? '');
+  console.log('[oauth] authorizationPage client_id:', clientId, 'redirect_uri:', redirectUri, 'response_type:', responseType, 'pkce:', !!codeChallenge);
   const client = clients.get(clientId);
   if (!client || responseType !== 'code' || !client.redirectUris.includes(redirectUri)) {
+    console.error('[oauth] authorizationPage invalid request - client found:', !!client, 'redirect_uri match:', client?.redirectUris.includes(redirectUri));
     return { status: 400, body: 'Invalid OAuth authorization request.' };
   }
   const action = `/oauth/authorize/approve?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge ?? '')}`;
@@ -69,10 +73,15 @@ export function authorizationPage(req: Request) {
 
 export function approve(req: Request) {
   const { client_id, redirect_uri, state, code_challenge } = req.query as Record<string, string>;
+  console.log('[oauth] approve client_id:', client_id, 'redirect_uri:', redirect_uri);
   const client = clients.get(client_id);
-  if (!client || !client.redirectUris.includes(redirect_uri)) return { status: 400, body: 'Invalid OAuth authorization request.' };
+  if (!client || !client.redirectUris.includes(redirect_uri)) {
+    console.error('[oauth] approve failed - client not found or redirect_uri mismatch');
+    return { status: 400, body: 'Invalid OAuth authorization request.' };
+  }
   const code = random();
   codes.set(code, { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge || undefined, expiresAt: Date.now() + 5 * 60 * 1000 });
+  console.log('[oauth] approve code issued:', code.slice(0, 8) + '...');
   const target = new URL(redirect_uri);
   target.searchParams.set('code', code);
   if (state) target.searchParams.set('state', state);
@@ -88,15 +97,21 @@ function verifyPkce(verifier: string | undefined, challenge: string | undefined)
 
 export function exchangeToken(body: any) {
   const grantType = body?.grant_type;
+  console.log('[oauth] exchangeToken grant_type:', grantType, 'client_id:', body?.client_id);
   if (grantType === 'authorization_code') {
     const item = codes.get(body.code);
+    console.log('[oauth] auth_code exchange - code found:', !!item, 'expired:', item ? item.expiresAt < Date.now() : 'N/A');
     if (!item || item.expiresAt < Date.now()) throw new Error('invalid_grant');
     codes.delete(body.code);
-    if (item.clientId !== body.client_id || item.redirectUri !== body.redirect_uri || !verifyPkce(body.code_verifier, item.codeChallenge)) throw new Error('invalid_grant');
+    if (item.clientId !== body.client_id || item.redirectUri !== body.redirect_uri || !verifyPkce(body.code_verifier, item.codeChallenge)) {
+      console.error('[oauth] auth_code exchange failed - client_id match:', item.clientId === body.client_id, 'redirect_uri match:', item.redirectUri === body.redirect_uri, 'pkce match:', verifyPkce(body.code_verifier, item.codeChallenge));
+      throw new Error('invalid_grant');
+    }
     return issueTokens(item.clientId);
   }
   if (grantType === 'refresh_token') {
     const item = refreshTokens.get(body.refresh_token);
+    console.log('[oauth] refresh_token exchange - token found:', !!item, 'expired:', item ? item.expiresAt < Date.now() : 'N/A');
     if (!item || item.expiresAt < Date.now() || item.clientId !== body.client_id) throw new Error('invalid_grant');
     refreshTokens.delete(body.refresh_token);
     return issueTokens(item.clientId);
@@ -115,7 +130,7 @@ function issueTokens(clientId: string) {
 export function validAccessToken(token: string | undefined) {
   if (!token) return false;
   const item = accessTokens.get(token);
-  if (!item) return false;
-  if (item.expiresAt < Date.now()) { accessTokens.delete(token); return false; }
+  if (!item) { console.log('[oauth] validAccessToken: token not found'); return false; }
+  if (item.expiresAt < Date.now()) { console.log('[oauth] validAccessToken: token expired'); accessTokens.delete(token); return false; }
   return true;
 }
