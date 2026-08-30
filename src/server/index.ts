@@ -1,12 +1,15 @@
 import { createServer as createHttpServer } from 'node:http';
 import crypto from 'node:crypto';
 import express from 'express';
+import QRCode from 'qrcode';
 import { WebSocketServer, WebSocket } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
 import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
+import { getDb } from './db.js';
+import { otpauthUri, randomBase32 } from './totp.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
@@ -27,7 +30,7 @@ class AgentRegistry {
 const registry = new AgentRegistry();
 function resultContent(value: unknown) { return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] }; }
 function bearer(req: express.Request) { const value = req.header('authorization'); return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
-function mcpAuthorized(req: express.Request) { const token = bearer(req); return validAccessToken(token) || (!!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN); }
+async function mcpAuthorized(req: express.Request) { const token = bearer(req); return await validAccessToken(token) || (!!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN); }
 function mcpUnauthorized(res: express.Response) { res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
 function buildMcpServer() {
@@ -44,15 +47,15 @@ function buildMcpServer() {
   return server;
 }
 
-const app = express(); app.disable('x-powered-by'); app.use(express.json({ limit: '2mb' }));
+const app = express(); app.disable('x-powered-by'); app.use(express.json({ limit: '2mb' })); app.use(express.urlencoded({ extended: false }));
 app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
 app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
 app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
-app.post('/oauth/register', (req, res) => { try { res.status(201).json(registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
-app.get('/oauth/authorize', (req, res) => { const result = authorizationPage(req); res.status(result.status).type('html').send(result.body); });
-app.post('/oauth/authorize/approve', (req, res) => { const result = approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
-app.post('/oauth/token', (req, res) => { try { res.json(exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
-app.get('/agents', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); res.json({ agents: registry.list() }); });
+app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
+app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
+app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
+app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
+app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res); res.json({ agents: registry.list() }); });
 
 // Caddy sets X-From-Caddy on public reverse-proxied requests. The admin UI is only
 // available to direct loopback requests (for example through an SSH -L tunnel).
@@ -62,14 +65,33 @@ function isLocalAdminRequest(req: express.Request) {
   const fromCaddy = req.get('X-From-Caddy') === 'true';
   return loopback && !fromCaddy;
 }
-app.get('/', (req, res) => {
+
+app.get('/', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT MCP Gateway</title><style>body{font-family:system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;background:#f6f7f9;color:#17202a}section{background:white;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}button{padding:8px 12px;margin:4px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}input,textarea,select{width:100%;box-sizing:border-box;padding:9px;margin:6px 0;border:1px solid #bbb;border-radius:8px}textarea{min-height:120px;font-family:monospace}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}</style></head><body><h1>ChatGPT MCP Gateway</h1><section><h2>Agents</h2><button onclick="refresh()">Refresh</button><div id="agents">Loading...</div></section><section><h2>Directory</h2><select id="agent"></select><input id="dir" value="C:\\Users\\bombl\\Desktop"><button onclick="call('list_directory')">List Directory</button><pre id="out"></pre></section><section><h2>Read file</h2><input id="file" value="C:\\Users\\bombl\\Desktop\\mcp-test.txt"><button onclick="call('read_file')">Read</button></section><section><h2>Write file</h2><input id="writepath" value="C:\\Users\\bombl\\Desktop\\mcp-created.txt"><textarea id="content">Hello from MCP Gateway!</textarea><button onclick="call('write_file')">Write</button></section><section><h2>System Info</h2><button onclick="call('get_system_info')">Get System Info</button></section><script>const $=id=>document.getElementById(id);async function refresh(){const r=await fetch('/healthz');const j=await r.json();$('agents').innerHTML=j.agents.length?j.agents.map(x=>'🟢 '+x).join('<br>'):'No agents connected';$('agent').innerHTML=j.agents.map(x=>'<option>'+x+'</option>').join('')}async function call(tool){const agentId=$('agent').value;let args={agentId};if(tool==='list_directory')args.path=$('dir').value;if(tool==='read_file')args.path=$('file').value;if(tool==='write_file'){args.path=$('writepath').value;args.content=$('content').value}const r=await fetch('/_admin/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tool,args})});$('out').textContent=await r.text()}refresh();</script></body></html>`);
+  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT MCP Gateway</title><style>body{font-family:system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;background:#f6f7f9;color:#17202a}section{background:white;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}button{padding:8px 12px;margin:4px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}input,textarea,select{width:100%;box-sizing:border-box;padding:9px;margin:6px 0;border:1px solid #bbb;border-radius:8px}textarea{min-height:120px;font-family:monospace}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}.qr{max-width:280px;width:100%;image-rendering:auto}</style></head><body><h1>ChatGPT MCP Gateway</h1><section><h2>Authenticator</h2><p>Scan this QR code with Google Authenticator, Microsoft Authenticator, 1Password, or another TOTP app. The QR code is only exposed on this local admin page.</p><div id="totp">Loading...</div></section><section><h2>Agents</h2><button onclick="refresh()">Refresh</button><div id="agents">Loading...</div></section><section><h2>Directory</h2><select id="agent"></select><input id="dir" value="C:\\Users\\bombl\\Desktop"><button onclick="call('list_directory')">List Directory</button><pre id="out"></pre></section><section><h2>Read file</h2><input id="file" value="C:\\Users\\bombl\\Desktop\\mcp-test.txt"><button onclick="call('read_file')">Read</button></section><section><h2>Write file</h2><input id="writepath" value="C:\\Users\\bombl\\Desktop\\mcp-created.txt"><textarea id="content">Hello from MCP Gateway!</textarea><button onclick="call('write_file')">Write</button></section><section><h2>System Info</h2><button onclick="call('get_system_info')">Get System Info</button></section><script>const $=id=>document.getElementById(id);async function setupTotp(){const r=await fetch('/_admin/totp');const j=await r.json();$('totp').innerHTML=j.configured?'<img class="qr" src="'+j.qrDataUrl+'"><p><b>Configured.</b> Account: '+j.account+'</p>':'Configuration failed: '+(j.error||'unknown error')}async function refresh(){const r=await fetch('/healthz');const j=await r.json();$('agents').innerHTML=j.agents.length?j.agents.map(x=>'🟢 '+x).join('<br>'):'No agents connected';$('agent').innerHTML=j.agents.map(x=>'<option>'+x+'</option>').join('')}async function call(tool){const agentId=$('agent').value;let args={agentId};if(tool==='list_directory')args.path=$('dir').value;if(tool==='read_file')args.path=$('file').value;if(tool==='write_file'){args.path=$('writepath').value;args.content=$('content').value}const r=await fetch('/_admin/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tool,args})});$('out').textContent=await r.text()}setupTotp();refresh();</script></body></html>`);
 });
+
+app.get('/_admin/totp', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  try {
+    const db = await getDb();
+    let row = await db.get<{ secret: string }>('SELECT secret FROM totp_config WHERE id = 1');
+    if (!row) {
+      const secret = randomBase32();
+      await db.run('INSERT INTO totp_config (id, secret, created_at, updated_at) VALUES (1, ?, ?, ?)', secret, Date.now(), Date.now());
+      row = { secret };
+    }
+    const account = 'owner';
+    const uri = otpauthUri(row.secret, 'ChatGPT-MCP', account);
+    const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 });
+    res.json({ configured: true, account, qrDataUrl });
+  } catch (e) { res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) }); }
+});
+
 app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({error:'tool not allowed in admin UI'}); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ok:true,result}); } catch (e) { res.status(500).json({ok:false,error:String(e instanceof Error?e.message:e)}); } });
 
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
-app.all('/mcp', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); return mcpHandler(req, res); });
+app.all('/mcp', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res); return mcpHandler(req, res); });
 const httpServer = createHttpServer(app); const wss = new WebSocketServer({ noServer: true });
 httpServer.on('upgrade', (req, socket, head) => { if (req.url !== '/agent') return socket.destroy(); if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; } wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)); });
 wss.on('connection', ws => { let agentId: string | undefined; let initialized = false; ws.on('message', raw => { try { const message = JSON.parse(raw.toString()) as AgentMessage; if (message.type === 'hello') { if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId'); agentId = message.agentId; initialized = true; registry.add(agentId, ws); console.log(`[agent] connected ${agentId} (${message.hostname})`); return; } if (!initialized) return ws.close(4003, 'hello required'); registry.handleMessage(message); } catch { ws.close(4004, 'invalid message'); } }); ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); }); });
