@@ -1,156 +1,176 @@
 # chatgpt-mcp
 
-Remote MCP gateway for controlling a Windows machine through a Node.js agent.
+Remote MCP gateway for controlling a Windows machine through a Node.js coding agent.
+
+## Tools
+
+### Filesystem
+
+- `list_agents`
+- `read_file`
+- `read_file_range`
+- `write_file`
+- `list_directory`
+- `find_files`
+- `rg`
+- `get_file_info`
+- `create_directory`
+- `copy_file`
+- `move_file`
+- `delete_file`
+- `tail_file`
+- `apply_patch`
+
+### Development runtimes
+
+- `run_npm`
+- `run_python`
+- `run_node`
+- `git`
+- `process_list`
+- `kill_process`
+- `execute_powershell`
+- `get_system_info`
+
+`rg`, `find_files`, and filesystem inspection do not require command execution. `run_npm`, `run_python`, `run_node`, `git`, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
+
+All paths are restricted to `AGENT_WORKSPACE`. Keep the agent running as a normal user, not Administrator.
+
+## Coding-agent prompt
+
+Use the following as a system/developer prompt when connecting an LLM to this MCP:
+
+```text
+You are a coding agent operating on a Windows development workspace through chatgpt-mcp.
+
+WORKING RULES
+1. Work only inside the configured agent workspace. Never attempt to access paths outside it.
+2. Before editing, discover the project with find_files and inspect relevant files with rg/read_file_range.
+3. Prefer rg for code search. Do not enumerate large directories or read whole large files when a range is enough.
+4. Prefer apply_patch for source changes. Keep patches small and reviewable.
+5. Use git status and git diff before and after meaningful changes.
+6. After changing code, run the smallest relevant validation: run_npm, run_node, or run_python. If it is a Git project, use git diff to verify the final change.
+7. Do not run destructive commands, delete unrelated files, reset/clean a repository, force-push, or kill unrelated processes unless the user explicitly asks.
+8. Never expose secrets, tokens, .env contents, private keys, credentials, or unrelated personal files in the response.
+9. For long-running commands, use a bounded command where possible. Use process_list to inspect processes and kill_process only for a process you intentionally started.
+10. When a command fails, inspect the error, search for the relevant code, make the smallest fix, and rerun the validation.
+11. Do not claim a test/build passed unless you actually ran it and received a successful exit code.
+12. At the end, summarize: files changed, behavior changed, validation performed, and any remaining issue.
+
+PREFERRED CODING LOOP
+find_files -> rg -> read_file_range -> apply_patch -> git diff -> run_* -> git diff
+
+TOOL GUIDANCE
+- rg: search text/regex in the workspace; use glob to narrow by language.
+- find_files: discover files by glob, e.g. **/*.ts.
+- read_file_range: inspect only the relevant lines.
+- apply_patch: apply a unified git patch; do not rewrite an entire file for a small change.
+- run_npm: use for npm commands such as test, build, lint, install when appropriate.
+- run_node: use for Node scripts or quick runtime checks.
+- run_python: use for Python scripts/tests.
+- git: use status, diff, log, branch, show, and other commands only when needed.
+- process_list / kill_process: manage processes started for development/testing.
+- tail_file: inspect the end of application/log files.
+```
+
+## Repeatable coding-tool test
+
+The repository includes `tests/coding-tools.test.ts`, which creates an isolated temporary workspace and exercises every newly added coding tool. It covers successful operations plus path and process safety checks.
+
+Run on the Windows agent after installing dependencies and ensuring `rg`, Node.js, npm, Python, and git are available:
+
+```powershell
+$env:ALLOW_COMMAND_EXECUTION="true"
+npm install
+npm run typecheck
+npm run test:coding
+```
+
+Expected final output:
+
+```text
+PASS: all coding tools
+```
+
+### Test matrix
+
+| Tool | Scenario | Expected result |
+|---|---|---|
+| `run_npm` | `npm --version` | exit code 0 and semver output |
+| `run_python` | print `6 * 7` | stdout contains `42` |
+| `run_node` | print `6 * 7` | stdout contains `42` |
+| `read_file_range` | read lines 2-4 | exact numbered range returned |
+| `tail_file` | read last 2 lines | exact final lines returned |
+| `get_file_info` | inspect sample file | type=file and size > 0 |
+| `create_directory` | create nested directory | directory exists |
+| `copy_file` | copy sample file | destination contents equal source |
+| `process_list` | list processes | exit code 0 and non-empty output |
+| `kill_process` | terminate a temporary child process | child exits |
+| `rg` | search `needle` | matching line is returned |
+| `git` | init/config/add/status | git commands succeed |
+| `apply_patch` | change `answer = 41` to `42` | file contains `answer = 42` |
+| `find_files` | glob `*.ts` | test TypeScript file is found |
+
+The test also verifies that a path outside `AGENT_WORKSPACE` is rejected and that the agent refuses to kill its own process.
+
+## Configuration
+
+Important Windows-agent environment variables:
+
+```powershell
+$env:SERVER_URL="wss://your-gateway.example/agent"
+$env:AGENT_ID="desktop-01"
+$env:AGENT_TOKEN="..."
+$env:AGENT_WORKSPACE="D:\Projects"
+$env:ALLOW_COMMAND_EXECUTION="true"
+$env:MAX_OUTPUT_BYTES="1000000"
+$env:MAX_SEARCH_RESULTS="500"
+$env:COMMAND_TIMEOUT_MS="120000"
+npm run agent
+```
+
+`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`.
+
+## Architecture
 
 ```text
 ChatGPT
    | OAuth 2.0 + MCP / HTTPS
    v
-https://bombless.duckdns.org
-   | Caddy -> 127.0.0.1:8787
-   v
-Red Hat gateway
-   | WSS (outbound from Windows)
+Gateway
+   | WSS
    v
 Windows Node.js agent
    +-- filesystem
-   +-- PowerShell (explicitly enabled)
-   +-- system information
+   +-- rg
+   +-- git
+   +-- npm / Python / Node
+   +-- process management
 ```
 
-The Windows machine does **not** need an inbound port. It opens the WebSocket connection to the Red Hat server.
-
-## Current status
-
-The repository now contains an OAuth-enabled MVP. The gateway exposes MCP at `/mcp`, OAuth authorization/token endpoints, OAuth metadata, and the Windows agent WebSocket at `/agent`.
-
-OAuth state is intentionally in memory for this MVP. Use a persistent/session-backed authorization service before running multiple gateway replicas.
-
-## Public endpoints
-
-With the supplied Caddy configuration:
-
-- MCP: `https://bombless.duckdns.org/mcp`
-- OAuth authorization: `https://bombless.duckdns.org/oauth/authorize`
-- OAuth token: `https://bombless.duckdns.org/oauth/token`
-- Dynamic client registration: `https://bombless.duckdns.org/oauth/register`
-- Authorization server metadata: `https://bombless.duckdns.org/.well-known/oauth-authorization-server`
-- Protected resource metadata: `https://bombless.duckdns.org/.well-known/oauth-protected-resource`
-- Windows agent: `wss://bombless.duckdns.org/agent`
-- Health: `https://bombless.duckdns.org/healthz`
-
-Your Caddy configuration can remain:
-
-```caddy
-bombless.duckdns.org {
-    reverse_proxy 127.0.0.1:8787
-}
-```
-
-Caddy terminates TLS and proxies both normal HTTP requests and WebSocket upgrades.
-
-## Tools
-
-- `list_agents`
-- `read_file`
-- `write_file`
-- `list_directory`
-- `move_file`
-- `delete_file`
-- `execute_powershell`
-- `get_system_info`
-
-All filesystem operations are restricted by the Windows agent's `ALLOWED_ROOTS` setting.
-
-PowerShell execution is disabled by default and requires `ALLOW_COMMAND_EXECUTION=true`.
-
-## 1. Red Hat gateway
-
-Requirements: Node.js 20+.
-
-```bash
-git clone https://github.com/bombless/chatgpt-mcp.git
-cd chatgpt-mcp
-npm install
-npm run build
-
-export PUBLIC_URL="https://bombless.duckdns.org"
-export AGENT_TOKEN="$(openssl rand -hex 32)"
-npm start
-```
-
-Keep `AGENT_TOKEN` secret and reuse the same value in the Windows agent. `MCP_TOKEN` is optional and is retained only as a legacy/local-testing bearer token; ChatGPT should use OAuth.
-
-The gateway listens on `127.0.0.1:8787`/`0.0.0.0:8787` by default. Do not expose port 8787 directly to the Internet; let Caddy be the public TLS endpoint.
-
-## 2. Windows agent
-
-Install Node.js 20+ and clone this repository on Windows.
-
-PowerShell example:
-
-```powershell
-cd C:\path\to\chatgpt-mcp
-npm install
-$env:SERVER_URL="wss://bombless.duckdns.org/agent"
-$env:AGENT_ID="desktop-01"
-$env:AGENT_TOKEN="the-agent-token-from-red-hat"
-$env:ALLOWED_ROOTS="C:\Users\YourName\Documents,C:\Users\YourName\Desktop,D:\Projects"
-$env:ALLOW_COMMAND_EXECUTION="false"
-npm run agent
-```
-
-The agent reconnects automatically after a dropped connection.
-
-## 3. Test the public OAuth metadata
-
-After the gateway is running and Caddy is active:
-
-```bash
-curl https://bombless.duckdns.org/.well-known/oauth-authorization-server
-curl https://bombless.duckdns.org/.well-known/oauth-protected-resource
-curl https://bombless.duckdns.org/healthz
-```
-
-The metadata endpoints should return JSON, and `/healthz` should report `ok: true`.
-
-## 4. Connect ChatGPT
-
-Use this MCP endpoint in the ChatGPT client that supports remote MCP connectors:
-
-```text
-https://bombless.duckdns.org/mcp
-```
-
-When the client discovers the protected resource metadata, it can use the OAuth endpoints exposed by this gateway. The first authorization displays a small approval page; after approval, the client exchanges the authorization code for an access token and uses that bearer token for `/mcp`.
-
-For the MVP, the OAuth authorization page is intentionally a single-user approval screen with no separate username/password database. **Do not treat this as production-grade identity management.** Anyone who can reach the authorization page and complete the client flow can authorize that client. Before exposing this to untrusted users, add real user authentication and persistent OAuth state.
-
-## Security model
-
-1. OAuth protects the public MCP endpoint.
-2. `AGENT_TOKEN` separately protects the Windows WebSocket endpoint.
-3. `ALLOWED_ROOTS` restricts Windows filesystem access.
-4. PowerShell is disabled unless `ALLOW_COMMAND_EXECUTION=true`.
-5. Run the Windows agent as a normal user, not Administrator.
-6. Keep port 8787 private behind Caddy/firewall.
-7. Use a long random `AGENT_TOKEN` and never commit `.env` files.
-
-Remote command execution is powerful. Start with PowerShell disabled and add an approval/allowlist layer before enabling it.
+The Windows machine does not need an inbound port. It opens the WebSocket connection to the gateway and reconnects after a dropped connection.
 
 ## Development
 
 ```bash
+npm install
 npm run typecheck
 npm run build
-npm run dev
+npm run test:coding
 ```
 
-For the Windows agent:
+Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
 
-```bash
-npm run agent
-```
+## Security notes
+
+1. OAuth protects the public MCP endpoint.
+2. `AGENT_TOKEN` protects the Windows WebSocket endpoint.
+3. `AGENT_WORKSPACE` confines filesystem operations.
+4. Command execution is disabled by default.
+5. Command tools use argument arrays and `shell: false`; they do not concatenate a shell command.
+6. `kill_process` refuses to terminate the agent itself.
+7. Do not expose the gateway's application port directly to the Internet; put it behind TLS/reverse proxy and firewall it appropriately.
+8. Before enabling command execution on an untrusted setup, add command allowlists, per-tool permissions, approvals, and audit logging.
 
 ## Roadmap
 
@@ -163,4 +183,4 @@ npm run agent
 - Windows Service installation
 - Command allowlists and audit logging
 - Multiple Windows agents with explicit targeting
-- End-to-end integration tests
+- MCP integration/end-to-end tests

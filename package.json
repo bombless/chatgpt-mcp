@@ -9,7 +9,8 @@
     "start": "node dist/server/index.js",
     "dev": "tsx src/server/index.ts",
     "agent": "tsx src/agent/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:coding": "tsx tests/coding-tools.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",

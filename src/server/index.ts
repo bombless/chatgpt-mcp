@@ -31,8 +31,11 @@ function mcpAuthorized(req: express.Request) { const token = bearer(req); return
 function mcpUnauthorized(res: express.Response) { res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
 function buildMcpServer() {
-  const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.2.0' });
+  const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
+  const cwdSchema = z.string().min(1).optional().describe('Workspace directory; must be inside AGENT_WORKSPACE.');
+  const codingTool = (name: ToolName, description: string, shape: z.ZodRawShape) => server.registerTool(name, { description, inputSchema: shape }, async (args) => resultContent(await registry.call(String(args.agentId), name, args as Record<string, unknown>)));
+
   server.registerTool('list_agents', { description: 'List connected Windows computers.', inputSchema: z.object({}) }, async () => resultContent(registry.list()));
   server.registerTool('read_file', { description: 'Read a UTF-8 text file on Windows.', inputSchema: z.object({ agentId: agentIdSchema, path: z.string().min(1) }) }, async ({ agentId, path }) => resultContent(await registry.call(agentId, 'read_file', { path })));
   server.registerTool('write_file', { description: 'Write UTF-8 text to a Windows file. Parent directories must already exist.', inputSchema: z.object({ agentId: agentIdSchema, path: z.string().min(1), content: z.string() }) }, async ({ agentId, path, content }) => resultContent(await registry.call(agentId, 'write_file', { path, content })));
@@ -41,6 +44,21 @@ function buildMcpServer() {
   server.registerTool('delete_file', { description: 'Delete a Windows file or empty directory.', inputSchema: z.object({ agentId: agentIdSchema, path: z.string().min(1) }) }, async ({ agentId, path }) => resultContent(await registry.call(agentId, 'delete_file', { path })));
   server.registerTool('execute_powershell', { description: 'Execute PowerShell on Windows. Agent policy may disable it.', inputSchema: z.object({ agentId: agentIdSchema, command: z.string().min(1) }) }, async ({ agentId, command }) => resultContent(await registry.call(agentId, 'execute_powershell', { command })));
   server.registerTool('get_system_info', { description: 'Get basic Windows system information.', inputSchema: z.object({ agentId: agentIdSchema }) }, async ({ agentId }) => resultContent(await registry.call(agentId, 'get_system_info', {})));
+
+  codingTool('run_npm', 'Run npm with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
+  codingTool('run_python', 'Run Python with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
+  codingTool('run_node', 'Run Node.js with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
+  codingTool('read_file_range', 'Read only a 1-based inclusive line range from a UTF-8 file.', { agentId: agentIdSchema, path: z.string().min(1), startLine: z.number().int().min(1), endLine: z.number().int().min(1) });
+  codingTool('tail_file', 'Read the last N lines of a UTF-8 text file.', { agentId: agentIdSchema, path: z.string().min(1), lines: z.number().int().min(1).max(10000).default(100) });
+  codingTool('get_file_info', 'Get file type, size, modification time and mode.', { agentId: agentIdSchema, path: z.string().min(1) });
+  codingTool('create_directory', 'Create a directory recursively inside the workspace.', { agentId: agentIdSchema, path: z.string().min(1) });
+  codingTool('copy_file', 'Copy a file inside the workspace.', { agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1) });
+  codingTool('process_list', 'List running processes on the Windows machine.', { agentId: agentIdSchema });
+  codingTool('kill_process', 'Terminate a process by PID. Requires ALLOW_COMMAND_EXECUTION=true; refuses to kill the agent itself.', { agentId: agentIdSchema, pid: z.number().int().positive() });
+  codingTool('rg', 'Search workspace text with ripgrep. Returns line and column matches.', { agentId: agentIdSchema, query: z.string().min(1), cwd: cwdSchema, glob: z.string().optional(), ignoreCase: z.boolean().optional(), maxResults: z.number().int().min(1).max(5000).default(500) });
+  codingTool('git', 'Run a git subcommand in a workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).min(1), cwd: cwdSchema });
+  codingTool('apply_patch', 'Apply a unified git patch inside the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema });
+  codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) });
   return server;
 }
 
@@ -54,18 +72,8 @@ app.post('/oauth/authorize/approve', (req, res) => { const result = approve(req)
 app.post('/oauth/token', (req, res) => { try { res.json(exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
 app.get('/agents', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); res.json({ agents: registry.list() }); });
 
-// Caddy sets X-From-Caddy on public reverse-proxied requests. The admin UI is only
-// available to direct loopback requests (for example through an SSH -L tunnel).
-function isLocalAdminRequest(req: express.Request) {
-  const ip = req.socket.remoteAddress ?? '';
-  const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-  const fromCaddy = req.get('X-From-Caddy') === 'true';
-  return loopback && !fromCaddy;
-}
-app.get('/', (req, res) => {
-  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT MCP Gateway</title><style>body{font-family:system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;background:#f6f7f9;color:#17202a}section{background:white;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}button{padding:8px 12px;margin:4px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}input,textarea,select{width:100%;box-sizing:border-box;padding:9px;margin:6px 0;border:1px solid #bbb;border-radius:8px}textarea{min-height:120px;font-family:monospace}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}</style></head><body><h1>ChatGPT MCP Gateway</h1><section><h2>Agents</h2><button onclick="refresh()">Refresh</button><div id="agents">Loading...</div></section><section><h2>Directory</h2><select id="agent"></select><input id="dir" value="C:\\Users\\bombl\\Desktop"><button onclick="call('list_directory')">List Directory</button><pre id="out"></pre></section><section><h2>Read file</h2><input id="file" value="C:\\Users\\bombl\\Desktop\\mcp-test.txt"><button onclick="call('read_file')">Read</button></section><section><h2>Write file</h2><input id="writepath" value="C:\\Users\\bombl\\Desktop\\mcp-created.txt"><textarea id="content">Hello from MCP Gateway!</textarea><button onclick="call('write_file')">Write</button></section><section><h2>System Info</h2><button onclick="call('get_system_info')">Get System Info</button></section><script>const $=id=>document.getElementById(id);async function refresh(){const r=await fetch('/healthz');const j=await r.json();$('agents').innerHTML=j.agents.length?j.agents.map(x=>'🟢 '+x).join('<br>'):'No agents connected';$('agent').innerHTML=j.agents.map(x=>'<option>'+x+'</option>').join('')}async function call(tool){const agentId=$('agent').value;let args={agentId};if(tool==='list_directory')args.path=$('dir').value;if(tool==='read_file')args.path=$('file').value;if(tool==='write_file'){args.path=$('writepath').value;args.content=$('content').value}const r=await fetch('/_admin/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tool,args})});$('out').textContent=await r.text()}refresh();</script></body></html>`);
-});
+function isLocalAdminRequest(req: express.Request) { const ip = req.socket.remoteAddress ?? ''; const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'; const fromCaddy = req.get('X-From-Caddy') === 'true'; return loopback && !fromCaddy; }
+app.get('/', (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); res.type('html').send('<!doctype html><html><body><h1>ChatGPT MCP Gateway</h1><p>Use MCP at /mcp. Admin UI is loopback-only.</p></body></html>'); });
 app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({error:'tool not allowed in admin UI'}); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ok:true,result}); } catch (e) { res.status(500).json({ok:false,error:String(e instanceof Error?e.message:e)}); } });
 
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
@@ -73,4 +81,4 @@ app.all('/mcp', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(
 const httpServer = createHttpServer(app); const wss = new WebSocketServer({ noServer: true });
 httpServer.on('upgrade', (req, socket, head) => { if (req.url !== '/agent') return socket.destroy(); if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; } wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)); });
 wss.on('connection', ws => { let agentId: string | undefined; let initialized = false; ws.on('message', raw => { try { const message = JSON.parse(raw.toString()) as AgentMessage; if (message.type === 'hello') { if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId'); agentId = message.agentId; initialized = true; registry.add(agentId, ws); console.log(`[agent] connected ${agentId} (${message.hostname})`); return; } if (!initialized) return ws.close(4003, 'hello required'); registry.handleMessage(message); } catch { ws.close(4004, 'invalid message'); } }); ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); }); });
-httpServer.listen(PORT, '0.0.0.0', () => { console.log(`MCP gateway listening on :${PORT}`); console.log(`Public MCP: ${PUBLIC_URL}/mcp`); console.log(`Agent endpoint: ${PUBLIC_URL}/agent`); console.log('Admin UI: http://127.0.0.1:' + PORT + '/ (loopback only)'); });
+httpServer.listen(PORT, '0.0.0.0', () => { console.log(`MCP gateway listening on :${PORT}`); console.log(`Public MCP: ${PUBLIC_URL}/mcp`); console.log(`Agent endpoint: ${PUBLIC_URL}/agent`); console.log('Admin UI: http://127.0.0.1:' + PORT + ' (loopback only)'); });
