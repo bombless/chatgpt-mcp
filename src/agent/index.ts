@@ -16,17 +16,14 @@ const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
 
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
 
-// Comma-separated absolute directories. Example:
-// ALLOWED_ROOTS="C:\\Users\\alice\\Documents,D:\\Projects"
-const allowedRoots = (process.env.ALLOWED_ROOTS ?? `${path.join(os.homedir(), 'Documents')},${path.join(os.homedir(), 'Desktop')}`)
-  .split(',')
-  .map(x => path.resolve(x.trim()))
-  .filter(Boolean);
+// The agent is intentionally restricted to this single Windows workspace.
+// All file paths are resolved and checked against this directory before access.
+const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? 'D:\\mcp-agent-workspace');
 
 function assertAllowed(target: string) {
   const resolved = path.resolve(target);
-  const ok = allowedRoots.some(root => resolved === root || resolved.startsWith(root + path.sep));
-  if (!ok) throw new Error(`Path is outside ALLOWED_ROOTS: ${resolved}`);
+  const ok = resolved === WORKSPACE_ROOT || resolved.startsWith(WORKSPACE_ROOT + path.sep);
+  if (!ok) throw new Error(`Path is outside agent workspace: ${resolved}`);
   return resolved;
 }
 
@@ -76,8 +73,7 @@ async function run(request: AgentRequest): Promise<unknown> {
         platform: process.platform,
         arch: process.arch,
         release: os.release(),
-        home: os.homedir(),
-        allowedRoots,
+        workspace: WORKSPACE_ROOT,
         commandExecutionEnabled: ALLOW_COMMAND_EXECUTION,
       };
     default:
@@ -129,6 +125,6 @@ function connect() {
   ws.on('error', error => console.error('[agent] websocket error:', error.message));
 }
 
-console.log(`[agent] allowed roots: ${allowedRoots.join(', ')}`);
+console.log(`[agent] workspace: ${WORKSPACE_ROOT}`);
 console.log(`[agent] PowerShell execution: ${ALLOW_COMMAND_EXECUTION ? 'ENABLED' : 'DISABLED'}`);
 connect();
