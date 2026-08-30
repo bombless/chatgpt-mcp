@@ -22,12 +22,17 @@ const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? 'D:\\mcp-agen
 
 function assertAllowed(target: string, operation: string) {
   const resolved = path.resolve(target);
-  const ok = resolved === WORKSPACE_ROOT || resolved.startsWith(WORKSPACE_ROOT + path.sep);
+  // Windows paths are case-insensitive, including the drive letter.
+  const normalizedResolved = resolved.toLowerCase();
+  const normalizedRoot = WORKSPACE_ROOT.toLowerCase();
+  const ok = normalizedResolved === normalizedRoot || normalizedResolved.startsWith(normalizedRoot + path.sep);
 
   console.log(`[agent] ${operation} path check:`);
   console.log(`[agent]   raw path: ${JSON.stringify(target)}`);
   console.log(`[agent]   resolved: ${JSON.stringify(resolved)}`);
   console.log(`[agent]   workspace: ${JSON.stringify(WORKSPACE_ROOT)}`);
+  console.log(`[agent]   normalized resolved: ${JSON.stringify(normalizedResolved)}`);
+  console.log(`[agent]   normalized workspace: ${JSON.stringify(normalizedRoot)}`);
   console.log(`[agent]   allowed: ${ok}`);
 
   if (!ok) {
