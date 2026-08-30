@@ -28,7 +28,7 @@ const registry = new AgentRegistry();
 function resultContent(value: unknown) { return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] }; }
 function bearer(req: express.Request) { const value = req.header('authorization'); return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
 function mcpAuthorized(req: express.Request) { const token = bearer(req); return validAccessToken(token) || (!!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN); }
-function mcpUnauthorized(res: express.Response) { res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${PUBLIC_URL}/.well-known/oauth-protected-resource"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
+function mcpUnauthorized(res: express.Response) { res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
 function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.2.0' });
@@ -54,12 +54,19 @@ app.post('/oauth/authorize/approve', (req, res) => { const result = approve(req)
 app.post('/oauth/token', (req, res) => { try { res.json(exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
 app.get('/agents', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); res.json({ agents: registry.list() }); });
 
-function isLoopback(req: express.Request) { const ip = req.socket.remoteAddress ?? ''; return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'; }
+// Caddy sets X-From-Caddy on public reverse-proxied requests. The admin UI is only
+// available to direct loopback requests (for example through an SSH -L tunnel).
+function isLocalAdminRequest(req: express.Request) {
+  const ip = req.socket.remoteAddress ?? '';
+  const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  const fromCaddy = req.get('X-From-Caddy') === 'true';
+  return loopback && !fromCaddy;
+}
 app.get('/', (req, res) => {
-  if (!isLoopback(req)) return res.status(404).send('Not found');
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT MCP Gateway</title><style>body{font-family:system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;background:#f6f7f9;color:#17202a}section{background:white;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}button{padding:8px 12px;margin:4px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}input,textarea,select{width:100%;box-sizing:border-box;padding:9px;margin:6px 0;border:1px solid #bbb;border-radius:8px}textarea{min-height:120px;font-family:monospace}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}</style></head><body><h1>ChatGPT MCP Gateway</h1><section><h2>Agents</h2><button onclick="refresh()">Refresh</button><div id="agents">Loading...</div></section><section><h2>Directory</h2><select id="agent"></select><input id="dir" value="C:\\Users\\bombl\\Desktop"><button onclick="call('list_directory')">List Directory</button><pre id="out"></pre></section><section><h2>Read file</h2><input id="file" value="C:\\Users\\bombl\\Desktop\\mcp-test.txt"><button onclick="call('read_file')">Read</button></section><section><h2>Write file</h2><input id="writepath" value="C:\\Users\\bombl\\Desktop\\mcp-created.txt"><textarea id="content">Hello from MCP Gateway!</textarea><button onclick="call('write_file')">Write</button></section><section><h2>System Info</h2><button onclick="call('get_system_info')">Get System Info</button></section><script>const $=id=>document.getElementById(id);async function refresh(){const r=await fetch('/healthz');const j=await r.json();$('agents').innerHTML=j.agents.length?j.agents.map(x=>'🟢 '+x).join('<br>'):'No agents connected';$('agent').innerHTML=j.agents.map(x=>'<option>'+x+'</option>').join('')}async function call(tool){const agentId=$('agent').value;let args={agentId};if(tool==='list_directory')args.path=$('dir').value;if(tool==='read_file')args.path=$('file').value;if(tool==='write_file'){args.path=$('writepath').value;args.content=$('content').value}const r=await fetch('/_admin/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tool,args})});$('out').textContent=await r.text()}refresh();</script></body></html>`);
 });
-app.post('/_admin/call', async (req, res) => { if (!isLoopback(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({error:'tool not allowed in admin UI'}); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ok:true,result}); } catch (e) { res.status(500).json({ok:false,error:String(e instanceof Error?e.message:e)}); } });
+app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({error:'tool not allowed in admin UI'}); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ok:true,result}); } catch (e) { res.status(500).json({ok:false,error:String(e instanceof Error?e.message:e)}); } });
 
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
 app.all('/mcp', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); return mcpHandler(req, res); });
