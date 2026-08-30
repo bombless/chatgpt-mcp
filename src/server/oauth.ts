@@ -23,6 +23,30 @@ function oauthDebug(event: string, details: Record<string, unknown> = {}) {
   console.log(`[oauth] ${event} ${JSON.stringify(details)}`);
 }
 
+// ChatGPT's web connector can arrive at the authorization endpoint with a
+// client_id that it generated itself, without first calling our dynamic
+// registration endpoint. We still bind that public client to the exact
+// redirect URI seen on the authorization request. Only ChatGPT's connector
+// callback host/path is accepted for this implicit-public-client path.
+function isChatGptConnectorRedirect(uri: string) {
+  try {
+    const url = new URL(uri);
+    return url.protocol === 'https:' && url.hostname === 'chatgpt.com' && url.pathname.startsWith('/connector/oauth/');
+  } catch {
+    return false;
+  }
+}
+
+function ensurePublicClient(clientId: string, redirectUri: string) {
+  const existing = clients.get(clientId);
+  if (existing) return { client: existing, created: false };
+  if (!isChatGptConnectorRedirect(redirectUri)) return { client: undefined, created: false };
+  const client: Client = { clientId, redirectUris: [redirectUri], clientName: 'ChatGPT' };
+  clients.set(clientId, client);
+  oauthDebug('authorize:implicit-public-client', { clientId: short(clientId), redirectUri });
+  return { client, created: true };
+}
+
 export function oauthMetadata() {
   const metadata = {
     issuer: PUBLIC_URL,
@@ -71,22 +95,39 @@ export function authorizationPage(req: Request) {
   const state = String(req.query.state ?? '');
   const codeChallenge = req.query.code_challenge ? String(req.query.code_challenge) : undefined;
   const responseType = String(req.query.response_type ?? '');
-  const client = clients.get(clientId);
+  const codeChallengeMethod = req.query.code_challenge_method ? String(req.query.code_challenge_method) : '';
+  const resource = req.query.resource ? String(req.query.resource) : undefined;
+
+  let client = clients.get(clientId);
+  const existingClient = Boolean(client);
+  if (!client) client = ensurePublicClient(clientId, redirectUri).client;
+  const redirectUriAllowed = Boolean(client?.redirectUris.includes(redirectUri));
+
   oauthDebug('authorize:start', {
     clientId: short(clientId),
     redirectUri,
     responseType,
     hasState: Boolean(state),
     hasCodeChallenge: Boolean(codeChallenge),
-    codeChallengeMethod: req.query.code_challenge_method,
+    codeChallengeMethod,
+    resource,
     clientFound: Boolean(client),
-    redirectUriAllowed: Boolean(client?.redirectUris.includes(redirectUri)),
+    existingClient,
+    implicitPublicClient: !existingClient && Boolean(client),
+    redirectUriAllowed,
   });
-  if (!client || responseType !== 'code' || !client.redirectUris.includes(redirectUri)) {
-    oauthDebug('authorize:rejected', { clientId: short(clientId), responseType, redirectUri });
+
+  if (!client || responseType !== 'code' || !redirectUriAllowed || codeChallengeMethod !== 'S256' || !codeChallenge) {
+    oauthDebug('authorize:rejected', {
+      clientId: short(clientId),
+      responseType,
+      redirectUri,
+      reason: !client ? 'unknown_client' : responseType !== 'code' ? 'unsupported_response_type' : !redirectUriAllowed ? 'redirect_uri_mismatch' : codeChallengeMethod !== 'S256' ? 'unsupported_pkce_method' : 'missing_code_challenge',
+    });
     return { status: 400, body: 'Invalid OAuth authorization request.' };
   }
-  const action = `/oauth/authorize/approve?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge ?? '')}`;
+
+  const action = `/oauth/authorize/approve?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge)}`;
   oauthDebug('authorize:page', { clientId: short(clientId), redirectUri });
   return {
     status: 200,
@@ -105,12 +146,12 @@ export function approve(req: Request) {
     clientFound: Boolean(client),
     redirectUriAllowed: Boolean(client?.redirectUris.includes(redirect_uri)),
   });
-  if (!client || !client.redirectUris.includes(redirect_uri)) {
+  if (!client || !client.redirectUris.includes(redirect_uri) || !code_challenge) {
     oauthDebug('authorize:approve:rejected', { clientId: short(client_id), redirectUri: redirect_uri });
     return { status: 400, body: 'Invalid OAuth authorization request.' };
   }
   const code = random();
-  codes.set(code, { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge || undefined, expiresAt: Date.now() + 5 * 60 * 1000 });
+  codes.set(code, { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, expiresAt: Date.now() + 5 * 60 * 1000 });
   const target = new URL(redirect_uri);
   target.searchParams.set('code', code);
   if (state) target.searchParams.set('state', state);
@@ -120,8 +161,8 @@ export function approve(req: Request) {
 
 function verifyPkce(verifier: string | undefined, challenge: string | undefined) {
   if (!challenge) {
-    oauthDebug('pkce:skip', { reason: 'no_challenge' });
-    return true;
+    oauthDebug('pkce:failed', { reason: 'no_challenge' });
+    return false;
   }
   if (!verifier) {
     oauthDebug('pkce:failed', { reason: 'missing_verifier' });
