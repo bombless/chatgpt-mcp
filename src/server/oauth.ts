@@ -114,7 +114,7 @@ export function approve(req: Request) {
   const target = new URL(redirect_uri);
   target.searchParams.set('code', code);
   if (state) target.searchParams.set('state', state);
-  oauthDebug('authorize:approve:success', { clientId: short(client_id), redirectUri, code: short(code), redirectTarget: target.origin + target.pathname, hasState: Boolean(state) });
+  oauthDebug('authorize:approve:success', { clientId: short(client_id), redirectUri: redirect_uri, code: short(code), redirectTarget: target.origin + target.pathname, hasState: Boolean(state) });
   return { status: 302, location: target.toString() };
 }
 
