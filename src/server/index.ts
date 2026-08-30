@@ -34,7 +34,7 @@ function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
   const cwdSchema = z.string().min(1).optional().describe('Workspace directory; must be inside AGENT_WORKSPACE.');
-  const codingTool = (name: ToolName, description: string, inputSchema: z.ZodTypeAny) => server.registerTool(name, { description, inputSchema }, async (args) => resultContent(await registry.call(String(args.agentId), name, args as Record<string, unknown>)));
+  const codingTool = (name: ToolName, description: string, shape: z.ZodRawShape) => server.registerTool(name, { description, inputSchema: shape }, async (args) => resultContent(await registry.call(String(args.agentId), name, args as Record<string, unknown>)));
 
   server.registerTool('list_agents', { description: 'List connected Windows computers.', inputSchema: z.object({}) }, async () => resultContent(registry.list()));
   server.registerTool('read_file', { description: 'Read a UTF-8 text file on Windows.', inputSchema: z.object({ agentId: agentIdSchema, path: z.string().min(1) }) }, async ({ agentId, path }) => resultContent(await registry.call(agentId, 'read_file', { path })));
@@ -45,20 +45,20 @@ function buildMcpServer() {
   server.registerTool('execute_powershell', { description: 'Execute PowerShell on Windows. Agent policy may disable it.', inputSchema: z.object({ agentId: agentIdSchema, command: z.string().min(1) }) }, async ({ agentId, command }) => resultContent(await registry.call(agentId, 'execute_powershell', { command })));
   server.registerTool('get_system_info', { description: 'Get basic Windows system information.', inputSchema: z.object({ agentId: agentIdSchema }) }, async ({ agentId }) => resultContent(await registry.call(agentId, 'get_system_info', {})));
 
-  codingTool('run_npm', 'Run npm with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', z.object({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }));
-  codingTool('run_python', 'Run Python with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', z.object({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }));
-  codingTool('run_node', 'Run Node.js with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', z.object({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }));
-  codingTool('read_file_range', 'Read only a 1-based inclusive line range from a UTF-8 file.', z.object({ agentId: agentIdSchema, path: z.string().min(1), startLine: z.number().int().min(1), endLine: z.number().int().min(1) }));
-  codingTool('tail_file', 'Read the last N lines of a UTF-8 text file.', z.object({ agentId: agentIdSchema, path: z.string().min(1), lines: z.number().int().min(1).max(10000).default(100) }));
-  codingTool('get_file_info', 'Get file type, size, modification time and mode.', z.object({ agentId: agentIdSchema, path: z.string().min(1) }));
-  codingTool('create_directory', 'Create a directory recursively inside the workspace.', z.object({ agentId: agentIdSchema, path: z.string().min(1) }));
-  codingTool('copy_file', 'Copy a file inside the workspace.', z.object({ agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1) }));
-  codingTool('process_list', 'List running processes on the Windows machine.', z.object({ agentId: agentIdSchema }));
-  codingTool('kill_process', 'Terminate a process by PID. Requires ALLOW_COMMAND_EXECUTION=true; refuses to kill the agent itself.', z.object({ agentId: agentIdSchema, pid: z.number().int().positive() }));
-  codingTool('rg', 'Search workspace text with ripgrep. Returns line and column matches.', z.object({ agentId: agentIdSchema, query: z.string().min(1), cwd: cwdSchema, glob: z.string().optional(), ignoreCase: z.boolean().optional(), maxResults: z.number().int().min(1).max(5000).default(500) }));
-  codingTool('git', 'Run a git subcommand in a workspace. Requires ALLOW_COMMAND_EXECUTION=true.', z.object({ agentId: agentIdSchema, args: z.array(z.string()).min(1), cwd: cwdSchema }));
-  codingTool('apply_patch', 'Apply a unified git patch inside the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', z.object({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema }));
-  codingTool('find_files', 'Find workspace files using an rg glob pattern.', z.object({ agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }));
+  codingTool('run_npm', 'Run npm with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
+  codingTool('run_python', 'Run Python with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
+  codingTool('run_node', 'Run Node.js with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
+  codingTool('read_file_range', 'Read only a 1-based inclusive line range from a UTF-8 file.', { agentId: agentIdSchema, path: z.string().min(1), startLine: z.number().int().min(1), endLine: z.number().int().min(1) });
+  codingTool('tail_file', 'Read the last N lines of a UTF-8 text file.', { agentId: agentIdSchema, path: z.string().min(1), lines: z.number().int().min(1).max(10000).default(100) });
+  codingTool('get_file_info', 'Get file type, size, modification time and mode.', { agentId: agentIdSchema, path: z.string().min(1) });
+  codingTool('create_directory', 'Create a directory recursively inside the workspace.', { agentId: agentIdSchema, path: z.string().min(1) });
+  codingTool('copy_file', 'Copy a file inside the workspace.', { agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1) });
+  codingTool('process_list', 'List running processes on the Windows machine.', { agentId: agentIdSchema });
+  codingTool('kill_process', 'Terminate a process by PID. Requires ALLOW_COMMAND_EXECUTION=true; refuses to kill the agent itself.', { agentId: agentIdSchema, pid: z.number().int().positive() });
+  codingTool('rg', 'Search workspace text with ripgrep. Returns line and column matches.', { agentId: agentIdSchema, query: z.string().min(1), cwd: cwdSchema, glob: z.string().optional(), ignoreCase: z.boolean().optional(), maxResults: z.number().int().min(1).max(5000).default(500) });
+  codingTool('git', 'Run a git subcommand in a workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).min(1), cwd: cwdSchema });
+  codingTool('apply_patch', 'Apply a unified git patch inside the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema });
+  codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) });
   return server;
 }
 
@@ -81,4 +81,4 @@ app.all('/mcp', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(
 const httpServer = createHttpServer(app); const wss = new WebSocketServer({ noServer: true });
 httpServer.on('upgrade', (req, socket, head) => { if (req.url !== '/agent') return socket.destroy(); if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; } wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)); });
 wss.on('connection', ws => { let agentId: string | undefined; let initialized = false; ws.on('message', raw => { try { const message = JSON.parse(raw.toString()) as AgentMessage; if (message.type === 'hello') { if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId'); agentId = message.agentId; initialized = true; registry.add(agentId, ws); console.log(`[agent] connected ${agentId} (${message.hostname})`); return; } if (!initialized) return ws.close(4003, 'hello required'); registry.handleMessage(message); } catch { ws.close(4004, 'invalid message'); } }); ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); }); });
-httpServer.listen(PORT, '0.0.0.0', () => { console.log(`MCP gateway listening on :${PORT}`); console.log(`Public MCP: ${PUBLIC_URL}/mcp`); console.log(`Agent endpoint: ${PUBLIC_URL}/agent`); console.log('Admin UI: http://127.0.0.1:' + PORT + '/ (loopback only)'); });
+httpServer.listen(PORT, '0.0.0.0', () => { console.log(`MCP gateway listening on :${PORT}`); console.log(`Public MCP: ${PUBLIC_URL}/mcp`); console.log(`Agent endpoint: ${PUBLIC_URL}/agent`); console.log('Admin UI: http://127.0.0.1:' + PORT + ' (loopback only)'); });
