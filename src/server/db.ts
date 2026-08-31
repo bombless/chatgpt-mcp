@@ -1,54 +1,64 @@
-import sqlite3 from 'sqlite3';
-import { open, type Database } from 'sqlite';
+import { access, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 
-const DB_PATH = process.env.DB_PATH ?? './chatgpt-mcp.sqlite';
-let dbPromise: Promise<Database> | undefined;
+const DB_PATH = process.env.DB_PATH ?? './chatgpt-mcp.json';
 
-export function getDb() {
-  if (!dbPromise) {
-    dbPromise = open({ filename: DB_PATH, driver: sqlite3.Database }).then(async db => {
-      await db.exec(`
-        PRAGMA journal_mode = WAL;
-        CREATE TABLE IF NOT EXISTS totp_config (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          secret TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS oauth_clients (
-          client_id TEXT PRIMARY KEY,
-          redirect_uris TEXT NOT NULL,
-          client_name TEXT,
-          created_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS oauth_codes (
-          code TEXT PRIMARY KEY,
-          client_id TEXT NOT NULL,
-          redirect_uri TEXT NOT NULL,
-          code_challenge TEXT,
-          expires_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS oauth_access_tokens (
-          token TEXT PRIMARY KEY,
-          client_id TEXT NOT NULL,
-          expires_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
-          token TEXT PRIMARY KEY,
-          client_id TEXT NOT NULL,
-          expires_at INTEGER NOT NULL
-        );
-      `);
-      return db;
-    });
+export type DbState = {
+  totp_config: { secret: string; created_at: number; updated_at: number } | null;
+  oauth_clients: Record<string, { client_id: string; redirect_uris: string[]; client_name?: string | null; created_at: number }>;
+  oauth_codes: Record<string, { code: string; client_id: string; redirect_uri: string; code_challenge?: string | null; expires_at: number }>;
+  oauth_access_tokens: Record<string, { token: string; client_id: string; expires_at: number }>;
+  oauth_refresh_tokens: Record<string, { token: string; client_id: string; expires_at: number }>;
+};
+
+const emptyDb = (): DbState => ({
+  totp_config: null,
+  oauth_clients: {},
+  oauth_codes: {},
+  oauth_access_tokens: {},
+  oauth_refresh_tokens: {},
+});
+
+let dbPromise: Promise<DbState> | undefined;
+let writeQueue: Promise<void> = Promise.resolve();
+
+async function persist(db: DbState) {
+  await mkdir(dirname(DB_PATH), { recursive: true });
+  await writeFile(DB_PATH, JSON.stringify(db, null, 2) + '\n', 'utf8');
+}
+
+async function loadDb(): Promise<DbState> {
+  try {
+    await access(DB_PATH);
+    const parsed = JSON.parse(await readFile(DB_PATH, 'utf8')) as Partial<DbState>;
+    return {
+      ...emptyDb(),
+      ...parsed,
+      oauth_clients: parsed.oauth_clients ?? {},
+      oauth_codes: parsed.oauth_codes ?? {},
+      oauth_access_tokens: parsed.oauth_access_tokens ?? {},
+      oauth_refresh_tokens: parsed.oauth_refresh_tokens ?? {},
+    };
+  } catch (error) {
+    const db = emptyDb();
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    await persist(db);
+    return db;
   }
+}
+
+export function getDb(): Promise<DbState> {
+  if (!dbPromise) dbPromise = loadDb();
   return dbPromise;
 }
 
+export async function saveDb(db: DbState) {
+  // Serialize writes so two OAuth requests cannot overwrite each other's changes.
+  writeQueue = writeQueue.then(() => persist(db));
+  await writeQueue;
+}
+
 export async function closeDb() {
-  if (dbPromise) {
-    const db = await dbPromise;
-    await db.close();
-    dbPromise = undefined;
-  }
+  await writeQueue;
+  dbPromise = undefined;
 }
