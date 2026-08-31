@@ -108,6 +108,20 @@ Expected final output:
 PASS: all coding tools
 ```
 
+## Current status and persistence
+
+The repository contains an OAuth-enabled MVP. The gateway exposes MCP at `/mcp`, OAuth authorization/token endpoints, OAuth metadata, and the Windows agent WebSocket at `/agent`.
+
+OAuth/TOTP state is persisted in a small local JSON file. No native database or native Node addon is required, so the gateway only needs Node.js 20+ on Windows or Red Hat.
+
+By default the gateway stores state in `./chatgpt-mcp.json`. Override the location with `DB_PATH` if desired:
+
+```bash
+export DB_PATH="/var/lib/chatgpt-mcp/chatgpt-mcp.json"
+```
+
+The file contains the TOTP secret and OAuth client/token state, so **protect it like a credential**. Do not commit it to Git or expose it over HTTP. For a single gateway instance this is deliberately simple and portable; for multiple replicas or higher-concurrency production use, move the persistence layer to PostgreSQL or another shared transactional store.
+
 ## Configuration
 
 Important Windows-agent environment variables:
@@ -178,6 +192,10 @@ Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
 8. Do not expose the gateway's application port directly to the Internet; put it behind TLS/reverse proxy and firewall it appropriately.
 9. Before enabling command execution on an untrusted setup, add command allowlists, per-tool permissions, approvals, and audit logging.
 10. Do not expose the browser's remote debugging port to the Internet; CDP provides powerful browser control and has no general-purpose authentication by default.
+11. Keep `chatgpt-mcp.json` private because it contains the TOTP secret and OAuth state.
+12. Never commit `.env` or JSON state files.
+
+Remote command execution is powerful. Start with PowerShell disabled and add an approval/allowlist layer before enabling it.
 
 ## Roadmap
 

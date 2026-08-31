@@ -3,3 +3,7 @@ dist/
 .env
 *.log
 .DS_Store
+chatgpt-mcp.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
