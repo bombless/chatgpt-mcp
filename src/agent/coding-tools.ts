@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { Sandbox } from 'microsandbox';
+import { MiB, Sandbox } from 'microsandbox';
 import { cdpCall, cdpListTargets, cdpVersion } from './cdp.js';
 
 const execFileAsync = promisify(execFile);
@@ -67,9 +67,10 @@ async function runPythonInMicrosandbox(args: Record<string, unknown>, logCommand
   const sandbox = await Sandbox.builder(sandboxName())
     .image(PYTHON_SANDBOX_IMAGE)
     .cpus(PYTHON_SANDBOX_CPUS)
-    .memory(PYTHON_SANDBOX_MEMORY_MIB)
+    .memory(MiB(PYTHON_SANDBOX_MEMORY_MIB))
     .volume(PYTHON_SANDBOX_GUEST_ROOT, mount => mount.bind(WORKSPACE_ROOT))
     .workdir(guest)
+    .replace()
     .create();
 
   try {
