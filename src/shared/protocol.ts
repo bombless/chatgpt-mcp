@@ -44,4 +44,7 @@ export type ToolName =
   | 'rg'
   | 'git'
   | 'apply_patch'
-  | 'find_files';
+  | 'find_files'
+  | 'cdp_version'
+  | 'cdp_list_targets'
+  | 'cdp_call';
