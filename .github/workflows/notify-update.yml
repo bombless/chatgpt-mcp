@@ -1,0 +1,32 @@
+name: notify-update-supervisor
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Notify MCP update endpoint
+        env:
+          UPDATE_WEBHOOK_TOKEN: ${{ secrets.UPDATE_WEBHOOK_TOKEN }}
+          UPDATE_URL: ${{ secrets.UPDATE_URL }}
+        run: |
+          test -n "$UPDATE_WEBHOOK_TOKEN"
+          test -n "$UPDATE_URL"
+          curl --fail-with-body --retry 5 --retry-delay 5 \
+            -X POST "$UPDATE_URL/_update" \
+            -H "Authorization: Bearer $UPDATE_WEBHOOK_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data '{"repository":"bombless/chatgpt-mcp","ref":"refs/heads/main","sha":"${{ github.sha }}"}'
