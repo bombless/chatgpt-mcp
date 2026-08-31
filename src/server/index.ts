@@ -7,6 +7,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
 import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
+import { authorizeUpdateRequest, requestUpdate } from './update.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
@@ -53,6 +54,16 @@ app.get('/oauth/authorize', (req, res) => { const result = authorizationPage(req
 app.post('/oauth/authorize/approve', (req, res) => { const result = approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
 app.post('/oauth/token', (req, res) => { try { res.json(exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
 app.get('/agents', (req, res) => { if (!mcpAuthorized(req)) return mcpUnauthorized(res); res.json({ agents: registry.list() }); });
+
+app.post('/_update', async (req, res) => {
+  if (!authorizeUpdateRequest(req.header('authorization'))) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const result = await requestUpdate(req.body ?? {});
+    res.status(202).json(result);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
 
 // Caddy sets X-From-Caddy on public reverse-proxied requests. The admin UI is only
 // available to direct loopback requests (for example through an SSH -L tunnel).
