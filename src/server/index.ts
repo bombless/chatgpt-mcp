@@ -47,6 +47,20 @@ function bearer(req: express.Request) { const value = req.header('authorization'
 async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
 function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
+async function fetchImage(url: string) {
+  const response = await fetch(url, { redirect: 'follow' });
+  if (!response.ok) throw new Error(`Image fetch failed: HTTP ${response.status}`);
+  const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  if (!contentType.startsWith('image/')) throw new Error(`URL did not return an image (content-type: ${contentType || 'unknown'})`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length === 0) throw new Error('Image response was empty');
+  return { bytes, mimeType: contentType };
+}
+
+function normalizeImageMimeType(mimeType: string) {
+  return mimeType.toLowerCase().split(';', 1)[0]?.trim() || 'image/png';
+}
+
 function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
@@ -66,6 +80,18 @@ function buildMcpServer() {
   server.registerTool('delete_file', { description: 'Delete a Windows file or empty directory.', inputSchema: z.object({ agentId: agentIdSchema, path: z.string().min(1) }) }, async ({ agentId, path }) => resultContent(await registry.call(agentId, 'delete_file', { path })));
   server.registerTool('execute_powershell', { description: 'Execute PowerShell on Windows. Agent policy may disable it.', inputSchema: z.object({ agentId: agentIdSchema, command: z.string().min(1) }) }, async ({ agentId, command }) => resultContent(await registry.call(agentId, 'execute_powershell', { command })));
   server.registerTool('get_system_info', { description: 'Get basic Windows system information.', inputSchema: z.object({ agentId: agentIdSchema }) }, async ({ agentId }) => resultContent(await registry.call(agentId, 'get_system_info', {})));
+
+  server.registerTool('fetch_image_block', { description: 'Fetch an image URL and return it as an MCP image content block. Useful for testing whether the MCP client renders image blocks.', inputSchema: z.object({ url: z.string().url() }) }, async ({ url }) => {
+    const { bytes, mimeType } = await fetchImage(url);
+    return { content: [{ type: 'image' as const, data: bytes.toString('base64'), mimeType: normalizeImageMimeType(mimeType) }] };
+  });
+
+  server.registerTool('fetch_image_base64', { description: 'Fetch an image URL and return its Base64-encoded bytes as text.', inputSchema: z.object({ url: z.string().url() }) }, async ({ url }) => {
+    const { bytes, mimeType } = await fetchImage(url);
+    return resultContent({ mimeType: normalizeImageMimeType(mimeType), base64: bytes.toString('base64') });
+  });
+
+  server.registerTool('fetch_image_url', { description: 'Return the supplied image URL unchanged. Useful for testing whether ChatGPT can display an image from a URL.', inputSchema: z.object({ url: z.string().url() }) }, async ({ url }) => resultContent({ url }));
 
   codingTool('run_npm', 'Run npm with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
   codingTool('run_python', 'Run Python with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema });
