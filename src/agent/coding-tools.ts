@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { cdpCall, cdpListTargets, cdpVersion } from './cdp.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
@@ -151,6 +152,9 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>)
     case 'git': return git(args);
     case 'apply_patch': return applyPatch(args);
     case 'find_files': return findFiles(args);
+    case 'cdp_version': return cdpVersion();
+    case 'cdp_list_targets': return cdpListTargets();
+    case 'cdp_call': return cdpCall(args);
     default: throw new Error(`Unsupported coding tool: ${tool}`);
   }
 }
