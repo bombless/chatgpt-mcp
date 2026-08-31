@@ -61,7 +61,7 @@ function buildMcpServer() {
   codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) });
   codingTool('cdp_version', 'Get the Chrome DevTools Protocol version from the Windows agent local browser at 127.0.0.1:9222.', { agentId: agentIdSchema });
   codingTool('cdp_list_targets', 'List browser tabs/targets exposed by the Windows agent local CDP endpoint at 127.0.0.1:9222.', { agentId: agentIdSchema });
-  codingTool('cdp_call', 'Call a Chrome DevTools Protocol method on a browser target exposed by 127.0.0.1:9222. The agent only connects to this fixed local CDP endpoint; targetId comes from cdp_list_targets.', { agentId: agentIdSchema, targetId: agentIdSchema, method: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional() });
+  codingTool('cdp_call', 'Call a Chrome DevTools Protocol method on a browser target exposed by 127.0.0.1:9222. The agent only connects to this fixed local CDP endpoint; targetId comes from cdp_list_targets.', { agentId: agentIdSchema, targetId: z.string().min(1).describe('CDP target id from cdp_list_targets'), method: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional() });
   return server;
 }
 
