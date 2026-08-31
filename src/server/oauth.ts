@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { Request } from 'express';
-import { getDb } from './db.js';
+import { getDb, saveDb } from './db.js';
 import { verifyTotp } from './totp.js';
 
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
@@ -20,17 +20,18 @@ export async function registerClient(body: any) {
   if (!Array.isArray(body?.redirect_uris) || body.redirect_uris.length === 0) throw new Error('redirect_uris is required');
   for (const uri of body.redirect_uris) if (typeof uri !== 'string' || !/^https?:\/\//.test(uri)) throw new Error('redirect_uris must contain http(s) URLs');
   const clientId = random(24), db = await getDb(), now = Date.now();
-  await db.run('INSERT INTO oauth_clients (client_id, redirect_uris, client_name, created_at) VALUES (?, ?, ?, ?)', clientId, JSON.stringify(body.redirect_uris), body.client_name ?? null, now);
+  db.oauth_clients[clientId] = { client_id: clientId, redirect_uris: body.redirect_uris, client_name: body.client_name ?? null, created_at: now };
+  await saveDb(db);
   return { client_id: clientId, client_name: body.client_name ?? 'MCP Client', redirect_uris: body.redirect_uris, token_endpoint_auth_method: 'none' };
 }
 
 async function getClient(clientId: string): Promise<Client | undefined> {
-  const row = await (await getDb()).get<{ client_id: string; redirect_uris: string; client_name?: string }>('SELECT client_id, redirect_uris, client_name FROM oauth_clients WHERE client_id = ?', clientId);
-  return row ? { clientId: row.client_id, redirectUris: JSON.parse(row.redirect_uris), clientName: row.client_name } : undefined;
+  const row = (await getDb()).oauth_clients[clientId];
+  return row ? { clientId: row.client_id, redirectUris: row.redirect_uris, clientName: row.client_name ?? undefined } : undefined;
 }
 
 async function getTotpSecret() {
-  return (await (await getDb()).get<{ secret: string }>('SELECT secret FROM totp_config WHERE id = 1'))?.secret;
+  return (await getDb()).totp_config?.secret;
 }
 
 export async function authorizationPage(req: Request) {
@@ -50,7 +51,8 @@ export async function approve(req: Request) {
   const token = String(req.body?.totp ?? '');
   if (!verifyTotp(secret, token)) return { status: 401, body: '<!doctype html><html><body style="font-family:system-ui,sans-serif;max-width:640px;margin:60px auto"><h2>Authorization denied</h2><p>Invalid or expired Authenticator code.</p><p><a href="javascript:history.back()">Try again</a></p></body></html>' };
   const code = random(), db = await getDb();
-  await db.run('INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, expires_at) VALUES (?, ?, ?, ?, ?)', code, client_id, redirect_uri, code_challenge || null, Date.now() + 5 * 60 * 1000);
+  db.oauth_codes[code] = { code, client_id, redirect_uri, code_challenge: code_challenge || null, expires_at: Date.now() + 5 * 60 * 1000 };
+  await saveDb(db);
   const target = new URL(redirect_uri); target.searchParams.set('code', code); if (state) target.searchParams.set('state', state);
   return { status: 302, location: target.toString() };
 }
@@ -65,16 +67,18 @@ function verifyPkce(verifier: string | undefined, challenge: string | undefined)
 export async function exchangeToken(body: any) {
   const db = await getDb();
   if (body?.grant_type === 'authorization_code') {
-    const item = await db.get<any>('SELECT code, client_id, redirect_uri, code_challenge, expires_at FROM oauth_codes WHERE code = ?', body.code);
+    const item = db.oauth_codes[body.code];
     if (!item || item.expires_at < Date.now()) throw new Error('invalid_grant');
-    await db.run('DELETE FROM oauth_codes WHERE code = ?', body.code);
-    if (item.client_id !== body.client_id || item.redirect_uri !== body.redirect_uri || !verifyPkce(body.code_verifier, item.code_challenge)) throw new Error('invalid_grant');
+    delete db.oauth_codes[body.code];
+    if (item.client_id !== body.client_id || item.redirect_uri !== body.redirect_uri || !verifyPkce(body.code_verifier, item.code_challenge ?? undefined)) throw new Error('invalid_grant');
+    await saveDb(db);
     return issueTokens(item.client_id);
   }
   if (body?.grant_type === 'refresh_token') {
-    const item = await db.get<any>('SELECT token, client_id, expires_at FROM oauth_refresh_tokens WHERE token = ?', body.refresh_token);
+    const item = db.oauth_refresh_tokens[body.refresh_token];
     if (!item || item.expires_at < Date.now() || item.client_id !== body.client_id) throw new Error('invalid_grant');
-    await db.run('DELETE FROM oauth_refresh_tokens WHERE token = ?', body.refresh_token);
+    delete db.oauth_refresh_tokens[body.refresh_token];
+    await saveDb(db);
     return issueTokens(item.client_id);
   }
   throw new Error('unsupported_grant_type');
@@ -82,15 +86,16 @@ export async function exchangeToken(body: any) {
 
 async function issueTokens(clientId: string) {
   const access = random(), refresh = random(), db = await getDb();
-  await db.run('INSERT INTO oauth_access_tokens (token, client_id, expires_at) VALUES (?, ?, ?)', access, clientId, Date.now() + ACCESS_TOKEN_TTL_MS);
-  await db.run('INSERT INTO oauth_refresh_tokens (token, client_id, expires_at) VALUES (?, ?, ?)', refresh, clientId, Date.now() + REFRESH_TOKEN_TTL_MS);
+  db.oauth_access_tokens[access] = { token: access, client_id: clientId, expires_at: Date.now() + ACCESS_TOKEN_TTL_MS };
+  db.oauth_refresh_tokens[refresh] = { token: refresh, client_id: clientId, expires_at: Date.now() + REFRESH_TOKEN_TTL_MS };
+  await saveDb(db);
   return { access_token: access, token_type: 'Bearer', expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000), refresh_token: refresh, scope: 'mcp' };
 }
 
 export async function validAccessToken(token: string | undefined) {
   if (!token) return false;
-  const db = await getDb(), item = await db.get<any>('SELECT token, expires_at FROM oauth_access_tokens WHERE token = ?', token);
+  const db = await getDb(), item = db.oauth_access_tokens[token];
   if (!item) return false;
-  if (item.expires_at < Date.now()) { await db.run('DELETE FROM oauth_access_tokens WHERE token = ?', token); return false; }
+  if (item.expires_at < Date.now()) { delete db.oauth_access_tokens[token]; await saveDb(db); return false; }
   return true;
 }
