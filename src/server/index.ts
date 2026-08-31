@@ -8,7 +8,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
 import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
-import { getDb } from './db.js';
+import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -75,14 +75,15 @@ app.get('/_admin/totp', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   try {
     const db = await getDb();
-    let row = await db.get<{ secret: string }>('SELECT secret FROM totp_config WHERE id = 1');
-    if (!row) {
-      const secret = randomBase32();
-      await db.run('INSERT INTO totp_config (id, secret, created_at, updated_at) VALUES (1, ?, ?, ?)', secret, Date.now(), Date.now());
-      row = { secret };
+    let config = db.totp_config;
+    if (!config) {
+      const now = Date.now();
+      config = { secret: randomBase32(), created_at: now, updated_at: now };
+      db.totp_config = config;
+      await saveDb(db);
     }
     const account = 'owner';
-    const uri = otpauthUri(row.secret, 'ChatGPT-MCP', account);
+    const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account);
     const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 });
     res.json({ configured: true, account, qrDataUrl });
   } catch (e) { res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) }); }
