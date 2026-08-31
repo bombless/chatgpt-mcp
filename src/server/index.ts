@@ -145,6 +145,22 @@ const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
 app.all('/mcp', async (req, res) => {
   if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
   mcpDebug('handler:dispatch', { method: req.method, contentType: req.get('content-type'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined });
+  const logToolsListResponse = req.body?.method === 'tools/list';
+  const responseChunks: Buffer[] = [];
+  if (logToolsListResponse) {
+    const originalWrite = res.write.bind(res);
+    const originalEnd = res.end.bind(res);
+    res.write = ((chunk: unknown, ...args: any[]) => {
+      if (chunk !== undefined && chunk !== null) responseChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      return originalWrite(chunk as any, ...args);
+    }) as typeof res.write;
+    res.end = ((chunk?: unknown, ...args: any[]) => {
+      if (chunk !== undefined && chunk !== null) responseChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      const body = Buffer.concat(responseChunks).toString('utf8');
+      console.log('[mcp] tools/list response:', body);
+      return originalEnd(chunk as any, ...args);
+    }) as typeof res.end;
+  }
   try {
     const result = mcpHandler(req, res, req.body);
     if (result && typeof (result as Promise<unknown>).then === 'function') void (result as Promise<unknown>).then(() => mcpDebug('handler:complete', { method: req.method })).catch(error => mcpDebug('handler:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }));
