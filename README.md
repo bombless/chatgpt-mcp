@@ -22,9 +22,19 @@ The Windows machine does **not** need an inbound port. It opens the WebSocket co
 
 ## Current status
 
-The repository now contains an OAuth-enabled MVP. The gateway exposes MCP at `/mcp`, OAuth authorization/token endpoints, OAuth metadata, and the Windows agent WebSocket at `/agent`.
+The repository contains an OAuth-enabled MVP. The gateway exposes MCP at `/mcp`, OAuth authorization/token endpoints, OAuth metadata, and the Windows agent WebSocket at `/agent`.
 
-OAuth state is intentionally in memory for this MVP. Use a persistent/session-backed authorization service before running multiple gateway replicas.
+OAuth/TOTP state is persisted in a small local JSON file. No native database or native Node addon is required, so the gateway only needs Node.js 20+ on Windows or Red Hat.
+
+## Persistence
+
+By default the gateway stores state in `./chatgpt-mcp.json`. Override the location with `DB_PATH` if desired:
+
+```bash
+export DB_PATH="/var/lib/chatgpt-mcp/chatgpt-mcp.json"
+```
+
+The file contains the TOTP secret and OAuth client/token state, so **protect it like a credential**. Do not commit it to Git or expose it over HTTP. For a single gateway instance this is deliberately simple and portable; for multiple replicas or higher-concurrency production use, move the persistence layer to PostgreSQL or another shared transactional store.
 
 ## Public endpoints
 
@@ -76,6 +86,7 @@ npm run build
 
 export PUBLIC_URL="https://bombless.duckdns.org"
 export AGENT_TOKEN="$(openssl rand -hex 32)"
+# Optional: export DB_PATH="/var/lib/chatgpt-mcp/chatgpt-mcp.json"
 npm start
 ```
 
@@ -134,7 +145,8 @@ For the MVP, the OAuth authorization page is intentionally a single-user approva
 4. PowerShell is disabled unless `ALLOW_COMMAND_EXECUTION=true`.
 5. Run the Windows agent as a normal user, not Administrator.
 6. Keep port 8787 private behind Caddy/firewall.
-7. Use a long random `AGENT_TOKEN` and never commit `.env` files.
+7. Keep `chatgpt-mcp.json` private because it contains the TOTP secret and OAuth state.
+8. Use a long random `AGENT_TOKEN` and never commit `.env` or JSON state files.
 
 Remote command execution is powerful. Start with PowerShell disabled and add an approval/allowlist layer before enabling it.
 
