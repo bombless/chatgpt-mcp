@@ -32,6 +32,14 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 - `execute_powershell`
 - `get_system_info`
 
+### Browser / CDP
+
+- `cdp_version`
+- `cdp_list_targets`
+- `cdp_call`
+
+The CDP tools run inside the Windows agent and connect **only** to `http://127.0.0.1:9222`, so ChatGPT can reach a browser's local Chrome DevTools Protocol endpoint without exposing port 9222 to the network. `cdp_list_targets` returns the available browser targets; pass a target's `id` to `cdp_call` and use the normal CDP method name and parameters, for example `Runtime.evaluate` or `Page.navigate`.
+
 `rg`, `find_files`, and filesystem inspection do not require command execution. `run_npm`, `run_python`, `run_node`, `git`, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
 
 All paths are restricted to `AGENT_WORKSPACE`. Keep the agent running as a normal user, not Administrator.
@@ -57,6 +65,11 @@ WORKING RULES
 11. Do not claim a test/build passed unless you actually ran it and received a successful exit code.
 12. At the end, summarize: files changed, behavior changed, validation performed, and any remaining issue.
 
+BROWSER / CDP
+13. When browser automation is needed, call cdp_list_targets first and choose the intended target by id.
+14. Use cdp_call for standard Chrome DevTools Protocol methods. The agent connects only to its local 127.0.0.1:9222 endpoint; do not try to access another host or port.
+15. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
+
 PREFERRED CODING LOOP
 find_files -> rg -> read_file_range -> apply_patch -> git diff -> run_* -> git diff
 
@@ -70,6 +83,9 @@ TOOL GUIDANCE
 - run_python: use for Python scripts/tests.
 - git: use status, diff, log, branch, show, and other commands only when needed.
 - process_list / kill_process: manage processes started for development/testing.
+- cdp_version: verify that the local browser CDP endpoint is reachable.
+- cdp_list_targets: enumerate tabs/pages exposed by the local CDP endpoint.
+- cdp_call: invoke a CDP method on a selected target.
 - tail_file: inspect the end of application/log files.
 ```
 
@@ -92,27 +108,6 @@ Expected final output:
 PASS: all coding tools
 ```
 
-### Test matrix
-
-| Tool | Scenario | Expected result |
-|---|---|---|
-| `run_npm` | `npm --version` | exit code 0 and semver output |
-| `run_python` | print `6 * 7` | stdout contains `42` |
-| `run_node` | print `6 * 7` | stdout contains `42` |
-| `read_file_range` | read lines 2-4 | exact numbered range returned |
-| `tail_file` | read last 2 lines | exact final lines returned |
-| `get_file_info` | inspect sample file | type=file and size > 0 |
-| `create_directory` | create nested directory | directory exists |
-| `copy_file` | copy sample file | destination contents equal source |
-| `process_list` | list processes | exit code 0 and non-empty output |
-| `kill_process` | terminate a temporary child process | child exits |
-| `rg` | search `needle` | matching line is returned |
-| `git` | init/config/add/status | git commands succeed |
-| `apply_patch` | change `answer = 41` to `42` | file contains `answer = 42` |
-| `find_files` | glob `*.ts` | test TypeScript file is found |
-
-The test also verifies that a path outside `AGENT_WORKSPACE` is rejected and that the agent refuses to kill its own process.
-
 ## Configuration
 
 Important Windows-agent environment variables:
@@ -126,10 +121,19 @@ $env:ALLOW_COMMAND_EXECUTION="true"
 $env:MAX_OUTPUT_BYTES="1000000"
 $env:MAX_SEARCH_RESULTS="500"
 $env:COMMAND_TIMEOUT_MS="120000"
+$env:CDP_TIMEOUT_MS="30000"
 npm run agent
 ```
 
-`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`.
+`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
+
+For Chrome/Chromium, start the browser with remote debugging enabled on port 9222, for example:
+
+```powershell
+chrome.exe --remote-debugging-port=9222
+```
+
+Do not bind or expose the browser debugging port publicly; the MCP agent deliberately connects to loopback only.
 
 ## Architecture
 
@@ -146,9 +150,10 @@ Windows Node.js agent
    +-- git
    +-- npm / Python / Node
    +-- process management
+   +-- CDP -> 127.0.0.1:9222
 ```
 
-The Windows machine does not need an inbound port. It opens the WebSocket connection to the gateway and reconnects after a dropped connection.
+The Windows machine does not need an inbound port. It opens the WebSocket connection to the gateway and reconnects after a dropped connection. The browser's CDP port is local to the Windows machine and is not proxied as a listening network port by the agent.
 
 ## Development
 
@@ -169,8 +174,10 @@ Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
 4. Command execution is disabled by default.
 5. Command tools use argument arrays and `shell: false`; they do not concatenate a shell command.
 6. `kill_process` refuses to terminate the agent itself.
-7. Do not expose the gateway's application port directly to the Internet; put it behind TLS/reverse proxy and firewall it appropriately.
-8. Before enabling command execution on an untrusted setup, add command allowlists, per-tool permissions, approvals, and audit logging.
+7. CDP access is hard-coded to `127.0.0.1:9222` to avoid turning the agent into an arbitrary network proxy.
+8. Do not expose the gateway's application port directly to the Internet; put it behind TLS/reverse proxy and firewall it appropriately.
+9. Before enabling command execution on an untrusted setup, add command allowlists, per-tool permissions, approvals, and audit logging.
+10. Do not expose the browser's remote debugging port to the Internet; CDP provides powerful browser control and has no general-purpose authentication by default.
 
 ## Roadmap
 
