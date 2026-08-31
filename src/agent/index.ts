@@ -28,6 +28,10 @@ function assertAllowed(target: string, operation: string) {
   return resolved;
 }
 
+function logCommand(command: string, cwd?: string) {
+  console.log(`[agent] $ ${command}${cwd ? ` (cwd: ${cwd})` : ''}`);
+}
+
 async function run(request: AgentRequest): Promise<unknown> {
   switch (request.tool as ToolName) {
     case 'read_file': {
@@ -60,6 +64,7 @@ async function run(request: AgentRequest): Promise<unknown> {
     case 'execute_powershell': {
       if (!ALLOW_COMMAND_EXECUTION) throw new Error('PowerShell execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable it.');
       const command = String(request.args.command);
+      logCommand(`powershell.exe -NoLogo -NoProfile -NonInteractive -Command ${command}`);
       try {
         const result = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: MAX_OUTPUT_BYTES });
         return { stdout: result.stdout, stderr: result.stderr, code: 0 };
@@ -70,7 +75,7 @@ async function run(request: AgentRequest): Promise<unknown> {
     case 'get_system_info':
       return { hostname: os.hostname(), platform: process.platform, arch: process.arch, release: os.release(), workspace: WORKSPACE_ROOT, commandExecutionEnabled: ALLOW_COMMAND_EXECUTION };
     default:
-      return runCodingTool(request.tool, request.args);
+      return runCodingTool(request.tool, request.args, logCommand);
   }
 }
 
