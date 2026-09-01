@@ -9,7 +9,7 @@ import { runCodingTool } from './coding-tools.js';
 
 const execFileAsync = promisify(execFile);
 const SERVER_URL = process.env.SERVER_URL ?? 'ws://127.0.0.1:8787/agent';
-const AGENT_TOKEN = process.env.AGENT_TOKEN;
+const AGENT_TOKEN = process.env.AGENT_TOKEN ?? '';
 const AGENT_ID = process.env.AGENT_ID ?? os.hostname();
 const AGENT_VERSION = '0.2.0';
 const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
@@ -80,7 +80,9 @@ async function run(request: AgentRequest): Promise<unknown> {
 }
 
 function connect() {
-  const ws = new WebSocket(SERVER_URL, { headers: { Authorization: `Bearer ${AGENT_TOKEN}` } });
+  const url = new URL(SERVER_URL);
+  url.searchParams.set('token', AGENT_TOKEN);
+  const ws = new WebSocket(url.toString());
   ws.on('open', () => {
     ws.send(JSON.stringify({ type: 'hello', agentId: AGENT_ID, hostname: os.hostname(), platform: process.platform, version: AGENT_VERSION }));
     console.log(`[agent] connected as ${AGENT_ID}`);
