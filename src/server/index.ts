@@ -130,8 +130,8 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
 app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
 app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(error) }); } });
-app.get('/oauth/authorize', async (req, res) => { try { res.type('html').send(await authorizationPage(req)); } catch (error) { res.status(400).send(String(error)); } });
-app.get('/oauth/approve', async (req, res) => { try { res.type('html').send(await approve(req)); } catch (error) { res.status(400).send(String(error)); } });
+app.get('/oauth/authorize', async (req, res) => { try { const r = await authorizationPage(req); res.status(r.status).type('html').send(r.body); } catch (error) { res.status(400).send(String(error)); } });
+app.get('/oauth/approve', async (req, res) => { try { const r = await approve(req); if (r.status === 302 && 'location' in r) return res.redirect(r.location); res.status(r.status).type('html').send(r.body); } catch (error) { res.status(400).send(String(error)); } });
 app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_grant', error_description: String(error) }); } });
 
 const mcpHandler = toNodeHandler(createMcpHandler(() => buildMcpServer()));
