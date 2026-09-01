@@ -119,7 +119,7 @@ function buildMcpServer() {
   codingTool('find_files', 'Find workspace files using a glob pattern.', { agentId: agentIdSchema, pattern: z.string().optional(), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ files: z.array(z.string()), truncated: z.boolean(), count: z.number().int() }) }));
   codingTool('cdp_version', 'Get Chrome DevTools Protocol version information.', { agentId: agentIdSchema }, z.object({ result: z.unknown() }));
   codingTool('cdp_list_targets', 'List Chrome DevTools Protocol targets.', { agentId: agentIdSchema }, z.object({ result: z.unknown() }));
-  codingTool('cdp_call', 'Call a Chrome DevTools Protocol method.', { agentId: agentIdSchema, method: z.string().min(1), params: z.record(z.unknown()).optional(), targetId: z.string().optional() }, z.object({ result: z.unknown() }));
+  codingTool('cdp_call', 'Call a Chrome DevTools Protocol method.', { agentId: agentIdSchema, method: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), targetId: z.string().optional() }, z.object({ result: z.unknown() }));
 
   return server;
 }
@@ -127,15 +127,14 @@ function buildMcpServer() {
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.get('/health', (_req, res) => res.json({ ok: true }));
-app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata(PUBLIC_URL)));
-app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata(PUBLIC_URL)));
+app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
+app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
 app.post('/oauth/register', (req, res) => { try { res.status(201).json(registerClient(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(error) }); } });
-app.get('/oauth/authorize', (req, res) => { try { res.type('html').send(authorizationPage(req.query)); } catch (error) { res.status(400).send(String(error)); } });
-app.get('/oauth/approve', (req, res) => { try { res.type('html').send(approve(req.query)); } catch (error) { res.status(400).send(String(error)); } });
+app.get('/oauth/authorize', (req, res) => { try { res.type('html').send(authorizationPage(req)); } catch (error) { res.status(400).send(String(error)); } });
+app.get('/oauth/approve', (req, res) => { try { res.type('html').send(approve(req)); } catch (error) { res.status(400).send(String(error)); } });
 app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_grant', error_description: String(error) }); } });
 
-const mcpServer = buildMcpServer();
-const mcpHandler = toNodeHandler(createMcpHandler(mcpServer));
+const mcpHandler = toNodeHandler(createMcpHandler(() => buildMcpServer()));
 app.all('/mcp', async (req, res) => { if (!(await mcpAuthorized(req))) return mcpUnauthorized(res, req); return mcpHandler(req, res); });
 
 const httpServer = createHttpServer(app);
