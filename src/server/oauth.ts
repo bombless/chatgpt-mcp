@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { Request } from 'express';
 import { getDb, saveDb } from './db.js';
 import { verifyTotp } from './totp.js';
+import './output-schema-hook.js';
 
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
 const ACCESS_TOKEN_TTL_MS = Number(process.env.ACCESS_TOKEN_TTL_MS ?? 60 * 60 * 1000);
