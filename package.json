@@ -6,8 +6,8 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server/index.js",
-    "dev": "tsx src/server/index.ts",
+    "start": "node --import ./dist/server/output-schema-hook.js dist/server/index.js",
+    "dev": "tsx --import ./src/server/output-schema-hook.ts src/server/index.ts",
     "agent": "tsx src/agent/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:coding": "tsx tests/coding-tools.test.ts"
@@ -23,9 +23,8 @@
   "devDependencies": {
     "@types/express": "^5.0.3",
     "@types/node": "^24.3.0",
-    "@types/qrcode": "^1.5.5",
+    "@types/qrcode": "^1.5.4",
     "@types/ws": "^8.18.1",
-    "tsx": "^4.20.3",
-    "typescript": "^5.9.2"
+    "tsx": "^4.20.3"
   }
 }
