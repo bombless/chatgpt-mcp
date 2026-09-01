@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cdpCall, cdpListTargets, cdpVersion } from './cdp.js';
 
@@ -12,6 +12,27 @@ const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
 const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? 'D:\\mcp-agent-workspace');
 
 type CommandLogger = (command: string, cwd?: string) => void;
+type PythonJobStatus = 'running' | 'exited' | 'failed' | 'killed';
+
+type PythonJob = {
+  jobId: string;
+  pid: number;
+  command: string;
+  cwd: string;
+  args: string[];
+  startedAt: string;
+  finishedAt?: string;
+  status: PythonJobStatus;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  child: ChildProcess;
+};
+
+const pythonJobs = new Map<string, PythonJob>();
 
 export function assertAllowed(target: string): string {
   const resolved = path.resolve(target);
@@ -38,6 +59,127 @@ function requireCommandExecution() {
   if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable run_npm, run_python, run_node, git, apply_patch, and kill_process.');
 }
 
+function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
+  const remaining = Math.max(0, MAX_OUTPUT_BYTES - Buffer.byteLength(current, 'utf8'));
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+  if (Buffer.byteLength(text, 'utf8') <= remaining) return { value: current + text, truncated: false };
+  return { value: current + Buffer.from(text, 'utf8').subarray(0, remaining).toString('utf8'), truncated: true };
+}
+
+function pythonExecutable() {
+  return process.platform === 'win32' ? 'python.exe' : 'python';
+}
+
+function spawnPythonJob(args: Record<string, unknown>, logCommand?: CommandLogger) {
+  requireCommandExecution();
+  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
+  const workingDirectory = assertAllowed(cwd);
+  const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+  const executable = pythonExecutable();
+  const commandLine = [executable, ...commandArgs].map(arg => /\s|["']/u.test(arg) ? JSON.stringify(arg) : arg).join(' ');
+  logCommand?.(commandLine, workingDirectory);
+
+  const child = spawn(executable, commandArgs, { cwd: workingDirectory, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+  const jobId = cryptoRandomId();
+  const job: PythonJob = {
+    jobId,
+    pid: child.pid ?? -1,
+    command: commandLine,
+    cwd: workingDirectory,
+    args: commandArgs,
+    startedAt: new Date().toISOString(),
+    status: 'running',
+    exitCode: null,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    child,
+  };
+  pythonJobs.set(jobId, job);
+
+  child.stdout?.on('data', chunk => {
+    const result = appendLimited(job.stdout, chunk);
+    job.stdout = result.value;
+    job.stdoutTruncated ||= result.truncated;
+  });
+  child.stderr?.on('data', chunk => {
+    const result = appendLimited(job.stderr, chunk);
+    job.stderr = result.value;
+    job.stderrTruncated ||= result.truncated;
+  });
+  child.once('error', error => {
+    job.stderr = appendLimited(job.stderr, error.message).value;
+    if (job.status === 'running') job.status = 'failed';
+  });
+  child.once('close', (code, signal) => {
+    job.finishedAt = new Date().toISOString();
+    job.exitCode = code;
+    job.signal = signal;
+    if (job.status === 'running') job.status = code === 0 ? 'exited' : 'failed';
+  });
+
+  return {
+    jobId,
+    pid: job.pid,
+    status: job.status,
+    command: job.command,
+    cwd: job.cwd,
+    startedAt: job.startedAt,
+  };
+}
+
+function cryptoRandomId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function publicJob(job: PythonJob) {
+  return {
+    jobId: job.jobId,
+    pid: job.pid,
+    status: job.status,
+    command: job.command,
+    cwd: job.cwd,
+    args: job.args,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt ?? null,
+    exitCode: job.exitCode,
+    signal: job.signal,
+    stdout: job.stdout,
+    stderr: job.stderr,
+    stdoutTruncated: job.stdoutTruncated,
+    stderrTruncated: job.stderrTruncated,
+  };
+}
+
+function inspectPythonJob(args: Record<string, unknown>) {
+  const jobId = stringArg(args, 'jobId');
+  const job = pythonJobs.get(jobId);
+  if (!job) throw new Error(`Python job '${jobId}' was not found`);
+  return publicJob(job);
+}
+
+async function killPythonJob(args: Record<string, unknown>) {
+  requireCommandExecution();
+  const jobId = stringArg(args, 'jobId');
+  const job = pythonJobs.get(jobId);
+  if (!job) throw new Error(`Python job '${jobId}' was not found`);
+  if (job.status !== 'running') return publicJob(job);
+
+  if (process.platform === 'win32') {
+    await exec('taskkill.exe', ['/PID', String(job.pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS);
+  } else {
+    job.child.kill('SIGTERM');
+  }
+  job.status = 'killed';
+  return publicJob(job);
+}
+
+function listPythonJobs() {
+  return [...pythonJobs.values()].map(publicJob).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+}
+
 async function command(name: 'npm' | 'python' | 'node', args: Record<string, unknown>, logCommand?: CommandLogger) {
   requireCommandExecution();
   const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
@@ -45,6 +187,11 @@ async function command(name: 'npm' | 'python' | 'node', args: Record<string, unk
   const executable = process.platform === 'win32' && name === 'npm' ? 'npm.cmd' : name;
   try { return await exec(executable, commandArgs, cwd, COMMAND_TIMEOUT_MS, logCommand); }
   catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
+}
+
+async function runPython(args: Record<string, unknown>, logCommand?: CommandLogger) {
+  if (args.async === true) return spawnPythonJob(args, logCommand);
+  return command('python', args, logCommand);
 }
 
 async function rg(args: Record<string, unknown>, logCommand?: CommandLogger) {
@@ -143,7 +290,10 @@ async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLog
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
     case 'run_npm': return command('npm', args, logCommand);
-    case 'run_python': return command('python', args, logCommand);
+    case 'run_python': return runPython(args, logCommand);
+    case 'python_job_inspect': return inspectPythonJob(args);
+    case 'python_job_kill': return killPythonJob(args);
+    case 'python_jobs': return listPythonJobs();
     case 'run_node': return command('node', args, logCommand);
     case 'read_file_range': return readFileRange(args);
     case 'tail_file': return tailFile(args);
