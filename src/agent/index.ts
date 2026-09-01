@@ -64,9 +64,9 @@ async function run(request: AgentRequest): Promise<unknown> {
     case 'execute_powershell': {
       if (!ALLOW_COMMAND_EXECUTION) throw new Error('PowerShell execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable it.');
       const command = String(request.args.command);
-      logCommand(`powershell.exe -NoLogo -NoProfile -NonInteractive -Command ${command}`);
+      logCommand(`pwsh.exe -NoLogo -NoProfile -NonInteractive -Command ${command}`);
       try {
-        const result = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: MAX_OUTPUT_BYTES });
+        const result = await execFileAsync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: MAX_OUTPUT_BYTES });
         return { stdout: result.stdout, stderr: result.stderr, code: 0 };
       } catch (error: any) {
         return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 };
