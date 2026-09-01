@@ -49,6 +49,41 @@ try {
   const python = await call('run_python', { args: ['-c', 'print(6 * 7)'] }) as any;
   assert.match(python.stdout, /42/);
 
+  const asyncJob = await call('run_python', {
+    args: ['-c', 'import time; print("started", flush=True); time.sleep(2); print("done", flush=True)'],
+    async: true,
+  }) as any;
+  assert.ok(asyncJob.jobId);
+  assert.equal(asyncJob.status, 'running');
+  assert.ok(asyncJob.pid > 0);
+
+  const inspectedWhileRunning = await call('python_job_inspect', { jobId: asyncJob.jobId }) as any;
+  assert.equal(inspectedWhileRunning.jobId, asyncJob.jobId);
+  assert.equal(inspectedWhileRunning.status, 'running');
+
+  const listed = await call('python_jobs') as any[];
+  assert.ok(listed.some(job => job.jobId === asyncJob.jobId));
+
+  await new Promise(resolve => setTimeout(resolve, 2600));
+  const inspectedAfterExit = await call('python_job_inspect', { jobId: asyncJob.jobId }) as any;
+  assert.equal(inspectedAfterExit.status, 'exited');
+  assert.equal(inspectedAfterExit.exitCode, 0);
+  assert.match(inspectedAfterExit.stdout, /started/);
+  assert.match(inspectedAfterExit.stdout, /done/);
+
+  const killJob = await call('run_python', {
+    args: ['-c', 'import time; time.sleep(60)'],
+    async: true,
+  }) as any;
+  assert.equal(killJob.status, 'running');
+  const killed = await call('python_job_kill', { jobId: killJob.jobId }) as any;
+  assert.equal(killed.jobId, killJob.jobId);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const inspectedKilled = await call('python_job_inspect', { jobId: killJob.jobId }) as any;
+  assert.equal(inspectedKilled.status, 'killed');
+
+  await assert.rejects(() => call('python_job_inspect', { jobId: 'missing-job' }), /was not found/);
+
   const npm = await call('run_npm', { args: ['--version'] }) as any;
   assert.equal(npm.code, 0);
   assert.match(npm.stdout, /\d+\.\d+/);
