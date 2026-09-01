@@ -89,6 +89,9 @@ function connect() {
     let request: AgentRequest;
     try { request = JSON.parse(raw.toString()) as AgentRequest; } catch { console.error('[agent] invalid JSON request'); return; }
     if (request.type !== 'request' || !request.id || !request.tool) return;
+    const intent = typeof request.args?.intent === 'string' ? request.args.intent.trim() : '';
+    if (intent) console.log(`[agent] intent: ${intent}`);
+    else console.log(`[agent] intent: (missing) tool=${request.tool}`);
     const response: AgentResponse = { type: 'response', id: request.id, ok: false };
     try { response.result = await run(request); response.ok = true; }
     catch (error) { response.error = error instanceof Error ? error.message : String(error); }
