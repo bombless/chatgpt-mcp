@@ -70,7 +70,7 @@ function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
   const cwdSchema = z.string().min(1).optional().describe('Workspace directory; must be inside AGENT_WORKSPACE.');
-  const intentSchema = z.string().min(1).max(500).describe('Briefly explain what you are doing and why. This is shown to the user as the current tool activity.');
+  const intentSchema = z.string().regex(/^let me .+$/u).max(500).describe('A short sentence explaining what you are doing and why. It must start with "let me ".');
   const commandResultSchema = z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int() });
   const pythonJobSchema = z.object({ jobId: z.string(), pid: z.number().int(), status: z.enum(['running', 'exited', 'failed', 'killed']), command: z.string(), cwd: z.string(), args: z.array(z.string()), startedAt: z.string(), finishedAt: z.string().nullable(), exitCode: z.number().int().nullable(), signal: z.string().nullable(), stdout: z.string(), stderr: z.string(), stdoutTruncated: z.boolean(), stderrTruncated: z.boolean() });
   const input = <const T extends Record<string, z.ZodTypeAny>>(shape: T): T & { intent: typeof intentSchema } => ({ ...shape, intent: intentSchema });
@@ -114,76 +114,39 @@ function buildMcpServer() {
   codingTool('process_list', 'List running processes on the Windows machine.', { agentId: agentIdSchema }, z.object({ result: commandResultSchema }));
   codingTool('kill_process', 'Terminate a process by PID. Requires ALLOW_COMMAND_EXECUTION=true; refuses to kill the agent itself.', { agentId: agentIdSchema, pid: z.number().int().positive() }, z.object({ result: z.object({ ok: z.literal(true), pid: z.number().int() }) }));
   codingTool('rg', 'Search workspace text with ripgrep. Returns line and column matches.', { agentId: agentIdSchema, query: z.string().min(1), cwd: cwdSchema, glob: z.string().optional(), ignoreCase: z.boolean().optional(), maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int(), matches: z.boolean(), truncated: z.boolean() }) }));
-  codingTool('git', 'Run a git subcommand in a workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).min(1), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
+  codingTool('git', 'Run git with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).min(1), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
   codingTool('apply_patch', 'Apply a unified git patch inside the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
-  codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ files: z.array(z.string()), truncated: z.boolean(), count: z.number().int() }) }));
-  codingTool('cdp_version', 'Get the Chrome DevTools Protocol version from the Windows agent local browser at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.record(z.string(), z.unknown()) }));
-  codingTool('cdp_list_targets', 'List browser tabs/targets exposed by the Windows agent local CDP endpoint at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.array(z.object({ id: z.string(), type: z.string().optional(), title: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional() })) }));
-  codingTool('cdp_call', 'Call a Chrome DevTools Protocol method on a browser target exposed by 127.0.0.1:9222. The agent only connects to this fixed local CDP endpoint; targetId comes from cdp_list_targets.', { agentId: agentIdSchema, targetId: z.string().min(1).describe('CDP target id from cdp_list_targets'), method: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional() }, z.object({ result: z.record(z.string(), z.unknown()) }));
+  codingTool('find_files', 'Find workspace files using a glob pattern.', { agentId: agentIdSchema, pattern: z.string().optional(), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ files: z.array(z.string()), truncated: z.boolean(), count: z.number().int() }) }));
+  codingTool('cdp_version', 'Get Chrome DevTools Protocol version information.', { agentId: agentIdSchema }, z.object({ result: z.unknown() }));
+  codingTool('cdp_list_targets', 'List Chrome DevTools Protocol targets.', { agentId: agentIdSchema }, z.object({ result: z.unknown() }));
+  codingTool('cdp_call', 'Call a Chrome DevTools Protocol method.', { agentId: agentIdSchema, method: z.string().min(1), params: z.record(z.unknown()).optional(), targetId: z.string().optional() }, z.object({ result: z.unknown() }));
+
   return server;
 }
 
 const app = express();
-app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: false, limit: '64kb' }));
-app.use((req, res, next) => { const id = requestId(req); res.setHeader('X-Request-Id', id); if (MCP_DEBUG) mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) }); res.on('finish', () => { if (MCP_DEBUG) mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode }); }); next(); });
-app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
-app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
-app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
-app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
-app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
-app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
-app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
-app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req); res.json({ agents: registry.list() }); });
-function isLocalAdminRequest(req: express.Request) { const ip = req.socket.remoteAddress ?? ''; const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'; const fromCaddy = req.get('X-From-Caddy') === 'true'; return loopback && !fromCaddy; }
+app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata(PUBLIC_URL)));
+app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata(PUBLIC_URL)));
+app.post('/oauth/register', (req, res) => { try { res.status(201).json(registerClient(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(error) }); } });
+app.get('/oauth/authorize', (req, res) => { try { res.type('html').send(authorizationPage(req.query)); } catch (error) { res.status(400).send(String(error)); } });
+app.get('/oauth/approve', (req, res) => { try { res.type('html').send(approve(req.query)); } catch (error) { res.status(400).send(String(error)); } });
+app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_grant', error_description: String(error) }); } });
 
-app.get('/', async (req, res) => {
-  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT MCP Gateway</title><style>body{font-family:system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;background:#f6f7f9;color:#17202a}section{background:white;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}button{padding:8px 12px;margin:4px;border:1px solid #bbb;border-radius:8px;background:#fff;cursor:pointer}input,textarea,select{width:100%;box-sizing:border-box;padding:9px;margin:6px 0;border:1px solid #bbb;border-radius:8px}textarea{min-height:120px;font-family:monospace}pre{background:#111;color:#eee;padding:12px;border-radius:8px;overflow:auto}.qr{max-width:280px;width:100%;image-rendering:auto}</style></head><body><h1>ChatGPT MCP Gateway</h1><section><h2>Authenticator</h2><p>Scan this QR code with Google Authenticator, Microsoft Authenticator, 1Password, or another TOTP app. The QR code is only exposed on this local admin page.</p><div id="totp">Loading...</div></section><section><h2>Agents</h2><button onclick="refresh()">Refresh</button><div id="agents">Loading...</div></section><section><h2>Directory</h2><select id="agent"></select><input id="dir" value="C:\\Users\\bombl\\Desktop"><button onclick="call('list_directory')">List Directory</button><pre id="out"></pre></section><section><h2>Read file</h2><input id="file" value="C:\\Users\\bombl\\Desktop\\mcp-test.txt"><button onclick="call('read_file')">Read</button></section><section><h2>Write file</h2><input id="writepath" value="C:\\Users\\bombl\\Desktop\\mcp-created.txt"><textarea id="content">Hello from MCP Gateway!</textarea><button onclick="call('write_file')">Write</button></section><section><h2>System Info</h2><button onclick="call('get_system_info')">Get System Info</button></section><script>const $=id=>document.getElementById(id);async function setupTotp(){const r=await fetch('/_admin/totp');const j=await r.json();$('totp').innerHTML=j.configured?'<img class="qr" src="'+j.qrDataUrl+'"><p><b>Configured.</b> Account: '+j.account+'</p>':'Configuration failed: '+(j.error||'unknown error')}async function refresh(){const r=await fetch('/healthz');const j=await r.json();$('agents').innerHTML=j.agents.length?j.agents.map(x=>'🟢 '+x).join('<br>'):'No agents connected';$('agent').innerHTML=j.agents.map(x=>'<option>'+x+'</option>').join('')}async function call(tool){const agentId=$('agent').value;let args={agentId};if(tool==='list_directory')args.path=$('dir').value;if(tool==='read_file')args.path=$('file').value;if(tool==='write_file'){args.path=$('writepath').value;args.content=$('content').value}const r=await fetch('/_admin/call',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tool,args})});$('out').textContent=await r.text()}setupTotp();refresh();</script></body></html>`);
+const mcpServer = buildMcpServer();
+const mcpHandler = toNodeHandler(createMcpHandler(mcpServer));
+app.all('/mcp', async (req, res) => { if (!(await mcpAuthorized(req))) return mcpUnauthorized(res, req); return mcpHandler(req, res); });
+
+const httpServer = createHttpServer(app);
+const wss = new WebSocketServer({ server: httpServer, path: '/agent' });
+wss.on('connection', (socket, req) => {
+  const url = new URL(req.url ?? '/agent', `http://${req.headers.host ?? 'localhost'}`);
+  if (url.searchParams.get('token') !== AGENT_TOKEN) { socket.close(4001, 'unauthorized'); return; }
+  const agentId = url.searchParams.get('agentId') || crypto.randomUUID();
+  registry.add(agentId, socket);
+  socket.send(JSON.stringify({ type: 'hello', agentId }));
+  socket.on('message', data => { try { registry.handleMessage(JSON.parse(data.toString()) as AgentMessage); } catch { /* ignore malformed agent messages */ } });
 });
 
-app.get('/_admin/totp', async (req, res) => {
-  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  try { const db = await getDb(); let config = db.totp_config; if (!config) { const now = Date.now(); config = { secret: randomBase32(), created_at: now, updated_at: now }; db.totp_config = config; await saveDb(db); } const account = 'owner'; const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account); const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 }); res.json({ configured: true, account, qrDataUrl }); } catch (e) { res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) }); }
-});
-
-app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({ error: 'tool not allowed in admin UI' }); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ ok: true, result }); } catch (e) { res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) }); } });
-
-const toBuffer = (chunk: unknown) => {
-  if (Buffer.isBuffer(chunk)) return chunk;
-  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
-  if (chunk instanceof ArrayBuffer) return Buffer.from(chunk);
-  return Buffer.from(String(chunk));
-};
-
-const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
-app.all('/mcp', async (req, res) => {
-  if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
-  mcpDebug('handler:dispatch', { method: req.method, contentType: req.get('content-type'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined });
-  const logToolsListResponse = req.body?.method === 'tools/list';
-  const responseChunks: Buffer[] = [];
-  if (logToolsListResponse) {
-    const originalWrite = res.write.bind(res);
-    const originalEnd = res.end.bind(res);
-    res.write = ((chunk: unknown, ...args: any[]) => {
-      if (chunk !== undefined && chunk !== null) responseChunks.push(toBuffer(chunk));
-      return originalWrite(chunk as any, ...args);
-    }) as typeof res.write;
-    res.end = ((chunk?: unknown, ...args: any[]) => {
-      if (chunk !== undefined && chunk !== null) responseChunks.push(toBuffer(chunk));
-      const body = Buffer.concat(responseChunks).toString('utf8');
-      console.log('[mcp] tools/list response:', body);
-      return originalEnd(chunk as any, ...args);
-    }) as typeof res.end;
-  }
-  try {
-    const result = mcpHandler(req, res, req.body);
-    if (result && typeof (result as Promise<unknown>).then === 'function') void (result as Promise<unknown>).then(() => mcpDebug('handler:complete', { method: req.method })).catch(error => mcpDebug('handler:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }));
-  } catch (error) { mcpDebug('handler:throw', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); throw error; }
-});
-
-const httpServer = createHttpServer(app); const wss = new WebSocketServer({ noServer: true });
-httpServer.on('upgrade', (req, socket, head) => { if (req.url !== '/agent') return socket.destroy(); if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; } wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req)); });
-wss.on('connection', ws => { let agentId: string | undefined; let initialized = false; ws.on('message', raw => { try { const message = JSON.parse(raw.toString()) as AgentMessage; if (message.type === 'hello') { if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId'); agentId = message.agentId; initialized = true; registry.add(agentId, ws); console.log(`[agent] connected ${agentId} (${message.hostname})`); return; } if (!initialized) return ws.close(4003, 'hello required'); registry.handleMessage(message); } catch { ws.close(4004, 'invalid message'); } }); ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); }); });
-httpServer.listen(PORT, '0.0.0.0', () => { console.log(`MCP gateway listening on :${PORT}`); console.log(`Public MCP: ${PUBLIC_URL}/mcp`); console.log(`Agent endpoint: ${PUBLIC_URL}/agent`); console.log('Admin UI: http://127.0.0.1:' + PORT + ' / (loopback only)'); console.log(`Debug logging: MCP=${MCP_DEBUG ? 'on' : 'off'}`); });
+httpServer.listen(PORT, () => console.log(`chatgpt-mcp listening on ${PUBLIC_URL}:${PORT}`));
