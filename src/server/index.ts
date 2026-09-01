@@ -150,6 +150,13 @@ app.get('/_admin/totp', async (req, res) => {
 
 app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({ error: 'tool not allowed in admin UI' }); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ ok: true, result }); } catch (e) { res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) }); } });
 
+const toBuffer = (chunk: unknown) => {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  if (chunk instanceof ArrayBuffer) return Buffer.from(chunk);
+  return Buffer.from(String(chunk));
+};
+
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
 app.all('/mcp', async (req, res) => {
   if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
@@ -160,11 +167,11 @@ app.all('/mcp', async (req, res) => {
     const originalWrite = res.write.bind(res);
     const originalEnd = res.end.bind(res);
     res.write = ((chunk: unknown, ...args: any[]) => {
-      if (chunk !== undefined && chunk !== null) responseChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      if (chunk !== undefined && chunk !== null) responseChunks.push(toBuffer(chunk));
       return originalWrite(chunk as any, ...args);
     }) as typeof res.write;
     res.end = ((chunk?: unknown, ...args: any[]) => {
-      if (chunk !== undefined && chunk !== null) responseChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      if (chunk !== undefined && chunk !== null) responseChunks.push(toBuffer(chunk));
       const body = Buffer.concat(responseChunks).toString('utf8');
       console.log('[mcp] tools/list response:', body);
       return originalEnd(chunk as any, ...args);
