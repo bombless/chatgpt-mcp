@@ -73,7 +73,7 @@ function buildMcpServer() {
   const intentSchema = z.string().min(1).max(500).describe('Briefly explain what you are doing and why. This is shown to the user as the current tool activity.');
   const commandResultSchema = z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int() });
   const pythonJobSchema = z.object({ jobId: z.string(), pid: z.number().int(), status: z.enum(['running', 'exited', 'failed', 'killed']), command: z.string(), cwd: z.string(), args: z.array(z.string()), startedAt: z.string(), finishedAt: z.string().nullable(), exitCode: z.number().int().nullable(), signal: z.string().nullable(), stdout: z.string(), stderr: z.string(), stdoutTruncated: z.boolean(), stderrTruncated: z.boolean() });
-  const input = (shape: Record<string, z.ZodTypeAny>) => ({ ...shape, intent: intentSchema });
+  const input = <const T extends Record<string, z.ZodTypeAny>>(shape: T): T & { intent: typeof intentSchema } => ({ ...shape, intent: intentSchema });
   const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodTypeAny>, outputSchema: z.ZodTypeAny) =>
     server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) =>
       resultContent(await registry.call(String(args.agentId), name, args)));
