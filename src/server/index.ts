@@ -70,7 +70,7 @@ function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
   const cwdSchema = z.string().min(1).optional().describe('Workspace directory; must be inside AGENT_WORKSPACE.');
-  const intentSchema = z.string().min(1).max(500).describe('Briefly explain what you are doing and why. This is shown to the user as the current tool activity.');
+  const intentSchema = z.string().min("let me ".length).max(500).describe('Briefly explain what you are doing and why. This is shown to the user as the current tool activity. You must start with "let me " and be a single sentence. For example: "let me read the first 100 lines of a log file to check for errors."');
   const commandResultSchema = z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int() });
   const pythonJobSchema = z.object({ jobId: z.string(), pid: z.number().int(), status: z.enum(['running', 'exited', 'failed', 'killed']), command: z.string(), cwd: z.string(), args: z.array(z.string()), startedAt: z.string(), finishedAt: z.string().nullable(), exitCode: z.number().int().nullable(), signal: z.string().nullable(), stdout: z.string(), stderr: z.string(), stdoutTruncated: z.boolean(), stderrTruncated: z.boolean() });
   const input = <const T extends Record<string, z.ZodTypeAny>>(shape: T): T & { intent: typeof intentSchema } => ({ ...shape, intent: intentSchema });
