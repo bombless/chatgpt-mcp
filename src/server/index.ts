@@ -73,8 +73,8 @@ function buildMcpServer() {
   const intentSchema = z.string().min("let me ".length).max(500).describe('Briefly explain what you are doing and why. This is shown to the user as the current tool activity. You must start with "let me " and be a single sentence. For example: "let me read the first 100 lines of a log file to check for errors."');
   const commandResultSchema = z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int() });
   const pythonJobSchema = z.object({ jobId: z.string(), pid: z.number().int(), status: z.enum(['running', 'exited', 'failed', 'killed']), command: z.string(), cwd: z.string(), args: z.array(z.string()), startedAt: z.string(), finishedAt: z.string().nullable(), exitCode: z.number().int().nullable(), signal: z.string().nullable(), stdout: z.string(), stderr: z.string(), stdoutTruncated: z.boolean(), stderrTruncated: z.boolean() });
-  const input = <const T extends Record<string, z.ZodTypeAny>>(shape: T) => z.object({ ...shape, intent: intentSchema });
-  const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodTypeAny>, outputSchema: z.ZodTypeAny) =>
+  const input = <const T extends Record<string, z.ZodType>>(shape: T) => z.object({ ...shape, intent: intentSchema });
+  const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodType>, outputSchema: z.ZodType) =>
     server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) =>
       resultContent(await registry.call(String(args.agentId), name, args)));
 
