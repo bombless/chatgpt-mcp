@@ -13,6 +13,15 @@ const causalSchemaFields = {
   continuation: continuationSchema,
 };
 
+const causalOutputSchema = z.object({
+  causal: z.object({
+    callId: z.string(),
+    executionId: z.string(),
+    chainId: z.string(),
+    parentCallId: z.string().nullable(),
+  }),
+});
+
 const originalRegisterTool = McpServer.prototype.registerTool;
 
 McpServer.prototype.registerTool = function(name: string, config: any, callback: any): any {
@@ -20,6 +29,10 @@ McpServer.prototype.registerTool = function(name: string, config: any, callback:
   const inputSchema = originalSchema && typeof originalSchema.extend === 'function'
     ? originalSchema.extend(causalSchemaFields)
     : originalSchema;
+  const originalOutputSchema = config?.outputSchema;
+  const outputSchema = originalOutputSchema && typeof originalOutputSchema.extend === 'function'
+    ? originalOutputSchema.extend(causalOutputSchema.shape)
+    : originalOutputSchema;
 
   const wrappedCallback = async (args: Record<string, unknown>, ctx: any) => {
     const executionId = String(ctx?.sessionId ?? `stateless:${ctx?.mcpReq?.id ?? crypto.randomUUID()}`);
@@ -43,22 +56,30 @@ McpServer.prototype.registerTool = function(name: string, config: any, callback:
     }
   };
 
-  return originalRegisterTool.call(this, name, { ...config, inputSchema }, wrappedCallback);
+  return originalRegisterTool.call(this, name, { ...config, inputSchema, outputSchema }, wrappedCallback);
 };
 
 function attachCausalMetadata(result: unknown, record: ReturnType<typeof causalGraph.begin>): unknown {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  const causal = {
+    callId: record.callId,
+    executionId: record.executionId,
+    chainId: record.chainId,
+    parentCallId: record.parentCallIds[0] ?? null,
+  };
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    return { causal };
+  }
   const value = result as Record<string, unknown>;
+  const structuredContent = value.structuredContent;
   return {
     ...value,
+    structuredContent: {
+      ...(structuredContent && typeof structuredContent === 'object' ? structuredContent : {}),
+      causal,
+    },
     _meta: {
       ...(value._meta && typeof value._meta === 'object' ? value._meta : {}),
-      'chatgpt-mcp/causal': {
-        callId: record.callId,
-        executionId: record.executionId,
-        chainId: record.chainId,
-        parentCallId: record.parentCallIds[0] ?? null,
-      },
+      'chatgpt-mcp/causal': causal,
     },
   };
 }
