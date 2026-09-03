@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node --import ./dist/server/causal-bootstrap.js dist/server/index.js",
-    "dev": "node --import tsx ./src/server/causal-bootstrap.ts --import ./src/server/causal-bootstrap.ts ./src/server/index.ts",
+    "dev": "node --import tsx --import ./src/server/causal-bootstrap.ts ./src/server/index.ts",
     "agent": "tsx src/agent/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:coding": "tsx tests/coding-tools.test.ts",
