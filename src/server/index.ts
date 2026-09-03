@@ -17,6 +17,7 @@ const LEGACY_MCP_TOKEN = process.env.MCP_TOKEN;
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 60_000);
 const MCP_DEBUG = process.env.MCP_DEBUG === '1' || process.env.DEBUG_MCP === '1';
+const LOCAL_MODE = process.argv.includes('--local');
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
 
 function mcpDebug(event: string, details: Record<string, unknown> = {}) { if (MCP_DEBUG) console.log(`[mcp] ${event} ${JSON.stringify(details)}`); }
@@ -49,7 +50,11 @@ function resultContent(value: unknown) {
   };
 }
 function bearer(req: express.Request) { const value = req.header('authorization'); return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
-async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
+async function mcpAuthorized(req: express.Request) {
+  if (LOCAL_MODE) return true;
+  const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN;
+  mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid;
+}
 function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
 async function fetchImage(url: string) {
@@ -126,7 +131,7 @@ function buildMcpServer() {
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, local: LOCAL_MODE }));
 app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
 app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
 app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (error) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(error) }); } });
@@ -148,4 +153,4 @@ wss.on('connection', (socket, req) => {
   socket.on('message', data => { try { registry.handleMessage(JSON.parse(data.toString()) as AgentMessage); } catch { /* ignore malformed agent messages */ } });
 });
 
-httpServer.listen(PORT, () => console.log(`chatgpt-mcp listening on ${PUBLIC_URL}:${PORT}`));
+httpServer.listen(PORT, () => console.log(`chatgpt-mcp listening on ${PUBLIC_URL}:${PORT}${LOCAL_MODE ? ' (local mode, OAuth disabled)' : ''}`));
