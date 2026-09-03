@@ -8,11 +8,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server/index.js",
-    "dev": "tsx src/server/index.ts",
+    "start": "node --import ./dist/server/causal-bootstrap.js dist/server/index.js",
+    "dev": "node --import tsx ./src/server/causal-bootstrap.ts --import ./src/server/causal-bootstrap.ts ./src/server/index.ts",
     "agent": "tsx src/agent/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:coding": "tsx tests/coding-tools.test.ts"
+    "test:coding": "tsx tests/coding-tools.test.ts",
+    "test:causal": "tsx tests/causal-chain.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
