@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import WebSocket from 'ws';
@@ -24,7 +25,6 @@ async function loadIdentity() {
   await fs.writeFile(AGENT_CONFIG, JSON.stringify(identity, null, 2) + '\n', 'utf8');
   return identity;
 }
-
 function assertAllowed(target: string, operation: string) { const resolved = path.resolve(target); const normalizedResolved = resolved.toLowerCase(); const normalizedRoot = WORKSPACE_ROOT.toLowerCase(); const ok = normalizedResolved === normalizedRoot || normalizedResolved.startsWith(normalizedRoot + path.sep); if (!ok) throw new Error(`Path is outside agent workspace: ${resolved}`); return resolved; }
 function logCommand(command: string, cwd?: string) { console.log(`[agent] $ ${command}${cwd ? ` (cwd: ${cwd})` : ''}`); }
 async function run(request: AgentRequest): Promise<unknown> {
@@ -39,7 +39,6 @@ async function run(request: AgentRequest): Promise<unknown> {
     default: return runCodingTool(request.tool, request.args, logCommand);
   }
 }
-
 async function connect() {
   const identity = await loadIdentity();
   const ws = new WebSocket(SERVER_URL, { headers: { Authorization: `Bearer ${AGENT_TOKEN}` } });
