@@ -64,24 +64,24 @@ async function run(request: AgentRequest): Promise<unknown> {
       return { ok: true, path: target };
     }
     case 'execute_powershell': {
-      if (!ALLOW_COMMAND_EXECUTION) {
-        throw new Error(LINUX_MODE
-          ? 'Bash execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Linux agent to enable it.'
-          : 'PowerShell execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable it.');
-      }
+      if (LINUX_MODE) throw new Error('execute_powershell is only available on Windows; use execute_bash on Linux.');
+      if (!ALLOW_COMMAND_EXECUTION) throw new Error('PowerShell execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable it.');
       const command = String(request.args.command);
-      if (LINUX_MODE) {
-        logCommand(`bash -lc ${JSON.stringify(command)}`);
-        try {
-          const result = await execFileAsync('/bin/bash', ['-lc', command], { maxBuffer: MAX_OUTPUT_BYTES });
-          return { stdout: result.stdout, stderr: result.stderr, code: 0 };
-        } catch (error: any) {
-          return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 };
-        }
-      }
       logCommand(`pwsh.exe -NoLogo -NoProfile -NonInteractive -Command ${command}`);
       try {
         const result = await execFileAsync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: MAX_OUTPUT_BYTES });
+        return { stdout: result.stdout, stderr: result.stderr, code: 0 };
+      } catch (error: any) {
+        return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 };
+      }
+    }
+    case 'execute_bash': {
+      if (!LINUX_MODE) throw new Error('execute_bash is only available in Linux mode; start the agent with --linux.');
+      if (!ALLOW_COMMAND_EXECUTION) throw new Error('Bash execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Linux agent to enable it.');
+      const command = String(request.args.command);
+      logCommand(`bash -lc ${JSON.stringify(command)}`);
+      try {
+        const result = await execFileAsync('/bin/bash', ['-lc', command], { maxBuffer: MAX_OUTPUT_BYTES });
         return { stdout: result.stdout, stderr: result.stderr, code: 0 };
       } catch (error: any) {
         return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 };
