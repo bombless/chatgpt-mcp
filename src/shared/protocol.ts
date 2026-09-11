@@ -30,6 +30,7 @@ export type ToolName =
   | 'move_file'
   | 'delete_file'
   | 'execute_powershell'
+  | 'execute_bash'
   | 'get_system_info'
   | 'run_npm'
   | 'run_python'
