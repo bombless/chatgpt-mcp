@@ -53,7 +53,13 @@ async function writeFileAtomic(file: string, content: string) {
   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.mcp-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
   try {
     await fs.writeFile(temporary, content, 'utf8');
-    await fs.rename(temporary, file);
+    try {
+      await fs.rename(temporary, file);
+    } catch (error) {
+      if (process.platform !== 'win32') throw error;
+      await fs.rm(file, { force: true });
+      await fs.rename(temporary, file);
+    }
   } finally {
     await fs.rm(temporary, { force: true });
   }
