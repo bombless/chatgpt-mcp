@@ -108,6 +108,51 @@ try {
   await call('apply_patch', { patch });
   assert.equal(await fs.readFile(path.join(root, 'app.ts'), 'utf8'), 'export const answer = 42;\n');
 
+  const editFile = path.join(root, 'edit.txt');
+  await fs.writeFile(editFile, 'alpha\nbeta\ngamma\n', 'utf8');
+  const before = await fs.readFile(editFile, 'utf8');
+  const edit = await call('edit_file', {
+    path: editFile,
+    oldText: 'beta',
+    newText: 'delta',
+    expectedReplacements: 1,
+  }) as any;
+  assert.equal(edit.ok, true);
+  assert.equal(edit.replacements, 1);
+  assert.equal(edit.changed, true);
+  assert.equal(edit.sha256Before.length, 64);
+  assert.equal(edit.sha256After.length, 64);
+  assert.match(edit.diff, /-beta/);
+  assert.match(edit.diff, /\+delta/);
+  assert.equal(await fs.readFile(editFile, 'utf8'), 'alpha\ndelta\ngamma\n');
+
+  await fs.writeFile(editFile, 'same\nsame\n', 'utf8');
+  await assert.rejects(() => call('edit_file', {
+    path: editFile,
+    oldText: 'same',
+    newText: 'changed',
+  }), /Expected 1 replacement, but found 2/);
+  assert.equal(await fs.readFile(editFile, 'utf8'), 'same\nsame\n');
+
+  const stable = await fs.readFile(editFile, 'utf8');
+  const stableSha = await call('edit_file', {
+    path: editFile,
+    oldText: 'same',
+    newText: 'changed',
+    expectedReplacements: 2,
+  }) as any;
+  assert.equal(stableSha.replacements, 2);
+  await fs.writeFile(editFile, stable, 'utf8');
+  await assert.rejects(() => call('edit_file', {
+    path: editFile,
+    oldText: 'same',
+    newText: 'changed',
+    expectedReplacements: 2,
+    expectedSha256: '0'.repeat(64),
+  }), /File changed since it was read/);
+  assert.equal(await fs.readFile(editFile, 'utf8'), stable);
+  assert.equal(before, 'alpha\nbeta\ngamma\n');
+
   const processes = await call('process_list') as any;
   assert.equal(processes.code, 0);
   assert.ok(processes.stdout.length > 0);
