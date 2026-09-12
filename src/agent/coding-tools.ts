@@ -9,7 +9,7 @@ const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
 const MAX_SEARCH_RESULTS = Number(process.env.MAX_SEARCH_RESULTS ?? 500);
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS ?? 120_000);
 const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
-const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? 'D:\\mcp-agent-workspace');
+const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (process.platform === 'linux' ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
 
 type CommandLogger = (command: string, cwd?: string) => void;
 type PythonJobStatus = 'running' | 'exited' | 'failed' | 'killed';
@@ -36,8 +36,8 @@ const pythonJobs = new Map<string, PythonJob>();
 
 export function assertAllowed(target: string): string {
   const resolved = path.resolve(target);
-  const root = WORKSPACE_ROOT.toLowerCase();
-  const normalized = resolved.toLowerCase();
+  const root = process.platform === 'win32' ? WORKSPACE_ROOT.toLowerCase() : WORKSPACE_ROOT;
+  const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
   if (normalized !== root && !normalized.startsWith(root + path.sep)) throw new Error(`Path is outside agent workspace: ${resolved}`);
   return resolved;
 }
@@ -56,7 +56,7 @@ async function exec(command: string, args: string[], cwd?: string, timeout = COM
 }
 
 function requireCommandExecution() {
-  if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable run_npm, run_python, run_node, git, apply_patch, and kill_process.');
+  if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable run_npm, run_python, run_node, git, apply_patch, and kill_process.');
 }
 
 function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
