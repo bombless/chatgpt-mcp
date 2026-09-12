@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cdpCall, cdpListTargets, cdpVersion } from './cdp.js';
@@ -46,6 +47,74 @@ function stringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   if (typeof value !== 'string' || !value) throw new Error(`${name} must be a non-empty string`);
   return value;
+}
+
+async function writeFileAtomic(file: string, content: string) {
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.mcp-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  try {
+    await fs.writeFile(temporary, content, 'utf8');
+    await fs.rename(temporary, file);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+}
+
+function sha256(content: string) {
+  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+async function editFile(args: Record<string, unknown>) {
+  const file = assertAllowed(stringArg(args, 'path'));
+  const oldText = stringArg(args, 'oldText');
+  const newText = typeof args.newText === 'string' ? args.newText : undefined;
+  if (newText === undefined) throw new Error('newText must be a string');
+  if (oldText === newText) throw new Error('oldText and newText must be different');
+
+  const content = await fs.readFile(file, 'utf8');
+  const expectedSha256 = typeof args.expectedSha256 === 'string' && args.expectedSha256 ? args.expectedSha256.toLowerCase() : undefined;
+  const beforeSha256 = sha256(content);
+  if (expectedSha256 && beforeSha256 !== expectedSha256) {
+    throw new Error(`File changed since it was read: expected sha256 ${expectedSha256}, current sha256 ${beforeSha256}`);
+  }
+
+  let replacements = 0;
+  let cursor = 0;
+  while (true) {
+    const index = content.indexOf(oldText, cursor);
+    if (index === -1) break;
+    replacements += 1;
+    cursor = index + oldText.length;
+  }
+
+  const expectedReplacements = args.expectedReplacements === undefined ? 1 : Number(args.expectedReplacements);
+  if (!Number.isInteger(expectedReplacements) || expectedReplacements < 1) throw new Error('expectedReplacements must be a positive integer');
+  if (replacements !== expectedReplacements) {
+    throw new Error(`Expected ${expectedReplacements} replacement${expectedReplacements === 1 ? '' : 's'}, but found ${replacements}`);
+  }
+
+  const updated = content.split(oldText).join(newText);
+  await writeFileAtomic(file, updated);
+  const afterSha256 = sha256(updated);
+  const beforeLines = oldText.split(/\r?\n/);
+  const afterLines = newText.split(/\r?\n/);
+  const firstLine = content.slice(0, content.indexOf(oldText)).split(/\r?\n/).length;
+  const diff = [
+    `@@ -${firstLine},${beforeLines.length} +${firstLine},${afterLines.length} @@`,
+    ...beforeLines.map(line => `-${line}`),
+    ...afterLines.map(line => `+${line}`),
+  ].join('\n');
+
+  return {
+    ok: true,
+    path: file,
+    changed: true,
+    replacements,
+    bytesBefore: Buffer.byteLength(content, 'utf8'),
+    bytesAfter: Buffer.byteLength(updated, 'utf8'),
+    sha256Before: beforeSha256,
+    sha256After: afterSha256,
+    diff,
+  };
 }
 
 async function exec(command: string, args: string[], cwd?: string, timeout = COMMAND_TIMEOUT_MS, logCommand?: CommandLogger) {
@@ -305,6 +374,7 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
     case 'rg': return rg(args, logCommand);
     case 'git': return git(args, logCommand);
     case 'apply_patch': return applyPatch(args, logCommand);
+    case 'edit_file': return editFile(args);
     case 'find_files': return findFiles(args, logCommand);
     case 'cdp_version': return cdpVersion();
     case 'cdp_list_targets': return cdpListTargets();
