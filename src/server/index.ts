@@ -43,8 +43,10 @@ class AgentRegistry {
 }
 const registry = new AgentRegistry();
 function resultContent(value: unknown) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  console.log('[mcp] agent result returned to model:', text);
   return {
-    content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
+    content: [{ type: 'text' as const, text }],
     structuredContent: { result: value },
   };
 }
