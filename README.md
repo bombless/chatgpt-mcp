@@ -92,8 +92,9 @@ TOOL GUIDANCE
 - git: use status, diff, log, branch, show, and other commands only when needed.
 - process_list / kill_process: manage processes started for development/testing.
 - cdp_version: verify that the local browser CDP endpoint is reachable.
-- cdp_list_targets: enumerate tabs/pages exposed by the local CDP endpoint.
+- cdp_list_targets: enumerate tabs/pages exposed by the local browser CDP endpoint.
 - cdp_call: invoke a CDP method on a selected target.
+- tail_file: inspect the end of application/log files.
 ```
 
 ## Repeatable coding-tool test
