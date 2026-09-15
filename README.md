@@ -65,10 +65,18 @@ WORKING RULES
 11. Do not claim a test/build passed unless you actually ran it and received a successful exit code.
 12. At the end, summarize: files changed, behavior changed, validation performed, and any remaining issue.
 
+MCP SESSION TOOL USAGE
+13. Tool usage is tracked by the MCP server, not by your memory.
+14. When the final response should report tool usage, call `get_session_tool_usage` immediately before the final response.
+15. Report only tools returned by `get_session_tool_usage`; use the server-provided counts and success/failure values.
+16. Never infer, guess, or reconstruct tool usage from your own conversation memory.
+17. Do not include `get_session_tool_usage` itself in the usage summary.
+18. Do not expose MCP session IDs, request IDs, tool arguments, command strings, file contents, credentials, tokens, or other sensitive data in the usage summary.
+
 BROWSER / CDP
-13. When browser automation is needed, call cdp_list_targets first and choose the intended target by id.
-14. Use cdp_call for standard Chrome DevTools Protocol methods. The agent connects only to its local 127.0.0.1:9222 endpoint; do not try to access another host or port.
-15. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
+19. When browser automation is needed, call cdp_list_targets first and choose the intended target by id.
+20. Use cdp_call for standard Chrome DevTools Protocol methods. The agent connects only to its local 127.0.0.1:9222 endpoint; do not try to access another host or port.
+21. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
 
 PREFERRED CODING LOOP
 find_files -> rg -> read_file_range -> apply_patch -> git diff -> run_* -> git diff
@@ -86,7 +94,6 @@ TOOL GUIDANCE
 - cdp_version: verify that the local browser CDP endpoint is reachable.
 - cdp_list_targets: enumerate tabs/pages exposed by the local CDP endpoint.
 - cdp_call: invoke a CDP method on a selected target.
-- tail_file: inspect the end of application/log files.
 ```
 
 ## Repeatable coding-tool test
@@ -100,6 +107,7 @@ $env:ALLOW_COMMAND_EXECUTION="true"
 npm install
 npm run typecheck
 npm run test:coding
+npm run test:tool-usage
 ```
 
 Expected final output:
@@ -107,6 +115,22 @@ Expected final output:
 ```text
 PASS: all coding tools
 ```
+
+## MCP session tool usage tracking
+
+The gateway keeps an in-memory aggregate of MCP tool usage. Each call records only the tool name and whether the call succeeded or failed; tool arguments are never stored. `get_session_tool_usage` exposes the authoritative aggregate to the LLM.
+
+Usage state is intentionally not written to `db.ts`, so normal tool calls do not cause persistent JSON database writes. Stale usage sessions are removed from memory after the configured TTL.
+
+Configure the TTL with:
+
+```bash
+SESSION_TOOL_USAGE_TTL_MS=21600000
+```
+
+The default is 6 hours.
+
+The tracker resolves the MCP session from the SDK handler context first and falls back to the inbound `Mcp-Session-Id` HTTP header. If a deployment is using the SDK's stateless per-request HTTP mode and supplies neither, the tracker cannot safely invent a cross-request session identity; those calls are reported under an `unidentified` bucket rather than being attributed to a guessed session.
 
 ## Current status and persistence
 
@@ -176,6 +200,7 @@ npm install
 npm run typecheck
 npm run build
 npm run test:coding
+npm run test:tool-usage
 ```
 
 Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
@@ -194,6 +219,7 @@ Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
 10. Do not expose the browser's remote debugging port to the Internet; CDP provides powerful browser control and has no general-purpose authentication by default.
 11. Keep `chatgpt-mcp.json` private because it contains the TOTP secret and OAuth state.
 12. Never commit `.env` or JSON state files.
+13. Tool usage tracking stores only aggregate tool names and outcome counts in memory; it does not persist tool arguments.
 
 Remote command execution is powerful. Start with PowerShell disabled and add an approval/allowlist layer before enabling it.
 
