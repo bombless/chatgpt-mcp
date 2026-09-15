@@ -106,8 +106,8 @@ function connect() {
     if (request.type !== 'request' || !request.id || !request.tool) return;
     const intent = typeof request.args?.intent === 'string' ? request.args.intent.trim() : '';
     const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
-    if (intent) console.log(`[${time}][agent] intent: ${intent}`);
-    else console.log(`[${time}][agent] intent: (missing) tool=${request.tool}`);
+    if (intent) console.log(`[agent][${time}] intent: ${intent}`);
+    else console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`);
     const response: AgentResponse = { type: 'response', id: request.id, ok: false };
     try { response.result = await run(request); response.ok = true; }
     catch (error) { response.error = error instanceof Error ? error.message : String(error); }
