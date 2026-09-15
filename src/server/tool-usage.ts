@@ -1,26 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 
-export type ToolUsageEntry = {
-  name: string;
-  count: number;
-  success: number;
-  failed: number;
-};
-
-export type SessionToolUsage = {
-  sessionId: string;
-  createdAt: number;
-  lastActivityAt: number;
-  tools: Map<string, ToolUsageEntry>;
-};
-
-export type SessionToolUsageResult = {
-  sessionId: string;
-  createdAt?: number;
-  lastActivityAt?: number;
-  tools: ToolUsageEntry[];
-};
+export type ToolUsageEntry = { name: string; count: number; success: number; failed: number };
+export type SessionToolUsage = { sessionId: string; createdAt: number; lastActivityAt: number; tools: Map<string, ToolUsageEntry> };
+export type SessionToolUsageResult = { sessionId: string; createdAt?: number; lastActivityAt?: number; tools: ToolUsageEntry[] };
 
 const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -30,10 +13,7 @@ export class ToolUsageTracker {
   start(sessionId: string): SessionToolUsage {
     const now = Date.now();
     const existing = this.sessions.get(sessionId);
-    if (existing) {
-      existing.lastActivityAt = now;
-      return existing;
-    }
+    if (existing) { existing.lastActivityAt = now; return existing; }
     const session: SessionToolUsage = { sessionId, createdAt: now, lastActivityAt: now, tools: new Map() };
     this.sessions.set(sessionId, session);
     return session;
@@ -94,11 +74,11 @@ export function getSessionIdFromToolContext(ctx: { sessionId?: string; http?: { 
 
 /** Installs server-wide instrumentation; only tool name/outcome are retained. */
 export function installToolUsageTracking(McpServerClass: typeof McpServer): void {
-  const prototype = McpServerClass.prototype as McpServerClass & { registerTool: (...args: any[]) => unknown };
+  type RegisterTool = (this: object, name: string, config: Record<string, unknown>, handler: (...args: any[]) => unknown) => unknown;
+  const prototype = McpServerClass.prototype as unknown as { registerTool: RegisterTool } & Record<PropertyKey, unknown>;
   const marker = Symbol.for('chatgpt-mcp.tool-usage-installed');
-  const prototypeRecord = prototype as unknown as Record<PropertyKey, unknown>;
-  if (prototypeRecord[marker]) return;
-  prototypeRecord[marker] = true;
+  if (prototype[marker]) return;
+  prototype[marker] = true;
 
   const originalRegisterTool = prototype.registerTool;
   const usageToolServers = new WeakSet<object>();
