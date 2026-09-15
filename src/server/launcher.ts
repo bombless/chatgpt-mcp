@@ -1,4 +1,9 @@
 import { createServer, request as httpRequest } from 'node:http';
+import { McpServer } from '@modelcontextprotocol/server';
+import { installToolUsageTracking, startToolUsageCleanup } from './tool-usage.js';
+
+installToolUsageTracking(McpServer);
+startToolUsageCleanup();
 
 const localMode = process.argv.slice(2).includes('--local');
 
@@ -8,9 +13,6 @@ if (!localMode) {
   const publicPort = Number(process.env.PORT ?? 8787);
   const internalPort = Number(process.env.LOCAL_INTERNAL_PORT ?? publicPort + 1);
   const localToken = process.env.LOCAL_MCP_TOKEN ?? 'chatgpt-mcp-local';
-
-  process.env.PORT = String(internalPort);
-  process.env.MCP_TOKEN = localToken;
 
   // The normal server still owns all MCP/agent logic. Local mode adds a
   // loopback-facing shim that injects a private bearer token, so an MCP
@@ -74,7 +76,7 @@ if (!localMode) {
       }
       lines.push('', '');
       socket.write(lines.join('\r\n'));
-      if (upstreamHead.length) socket.write(upstreamHead);
+      if (upstreamHead.length) upstreamSocket.write(upstreamHead);
       if (head.length) upstreamSocket.write(head);
       socket.pipe(upstreamSocket);
       upstreamSocket.pipe(socket);
