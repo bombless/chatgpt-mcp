@@ -1,4 +1,5 @@
 import type { McpServer } from '@modelcontextprotocol/server';
+import * as z from 'zod';
 
 export type ToolUsageEntry = {
   name: string;
@@ -33,24 +34,14 @@ export class ToolUsageTracker {
       existing.lastActivityAt = now;
       return existing;
     }
-    const session: SessionToolUsage = {
-      sessionId,
-      createdAt: now,
-      lastActivityAt: now,
-      tools: new Map(),
-    };
+    const session: SessionToolUsage = { sessionId, createdAt: now, lastActivityAt: now, tools: new Map() };
     this.sessions.set(sessionId, session);
     return session;
   }
 
   recordStart(sessionId: string, toolName: string): ToolUsageEntry {
     const session = this.start(sessionId);
-    const entry = session.tools.get(toolName) ?? {
-      name: toolName,
-      count: 0,
-      success: 0,
-      failed: 0,
-    };
+    const entry = session.tools.get(toolName) ?? { name: toolName, count: 0, success: 0, failed: 0 };
     entry.count += 1;
     session.lastActivityAt = Date.now();
     session.tools.set(toolName, entry);
@@ -59,12 +50,7 @@ export class ToolUsageTracker {
 
   recordSuccess(sessionId: string, toolName: string): void {
     const session = this.start(sessionId);
-    const entry = session.tools.get(toolName) ?? {
-      name: toolName,
-      count: 0,
-      success: 0,
-      failed: 0,
-    };
+    const entry = session.tools.get(toolName) ?? { name: toolName, count: 0, success: 0, failed: 0 };
     entry.success += 1;
     session.lastActivityAt = Date.now();
     session.tools.set(toolName, entry);
@@ -72,12 +58,7 @@ export class ToolUsageTracker {
 
   recordFailure(sessionId: string, toolName: string): void {
     const session = this.start(sessionId);
-    const entry = session.tools.get(toolName) ?? {
-      name: toolName,
-      count: 0,
-      success: 0,
-      failed: 0,
-    };
+    const entry = session.tools.get(toolName) ?? { name: toolName, count: 0, success: 0, failed: 0 };
     entry.failed += 1;
     session.lastActivityAt = Date.now();
     session.tools.set(toolName, entry);
@@ -86,59 +67,34 @@ export class ToolUsageTracker {
   get(sessionId: string): SessionToolUsageResult {
     const session = this.sessions.get(sessionId);
     if (!session) return { sessionId, tools: [] };
-    return {
-      sessionId,
-      createdAt: session.createdAt,
-      lastActivityAt: session.lastActivityAt,
-      tools: [...session.tools.values()].map(entry => ({ ...entry })),
-    };
+    return { sessionId, createdAt: session.createdAt, lastActivityAt: session.lastActivityAt, tools: [...session.tools.values()].map(entry => ({ ...entry })) };
   }
 
-  delete(sessionId: string): void {
-    this.sessions.delete(sessionId);
-  }
+  delete(sessionId: string): void { this.sessions.delete(sessionId); }
 
   cleanup(ttlMs: number = DEFAULT_TTL_MS): number {
     const cutoff = Date.now() - ttlMs;
     let deleted = 0;
     for (const [sessionId, session] of this.sessions) {
-      if (session.lastActivityAt < cutoff) {
-        this.sessions.delete(sessionId);
-        deleted += 1;
-      }
+      if (session.lastActivityAt < cutoff) { this.sessions.delete(sessionId); deleted += 1; }
     }
     return deleted;
   }
 
-  size(): number {
-    return this.sessions.size;
-  }
+  size(): number { return this.sessions.size; }
 }
 
 export const toolUsage = new ToolUsageTracker();
+export const SESSION_TOOL_USAGE_TTL_MS = Number(process.env.SESSION_TOOL_USAGE_TTL_MS ?? DEFAULT_TTL_MS);
 
-export const SESSION_TOOL_USAGE_TTL_MS = Number(
-  process.env.SESSION_TOOL_USAGE_TTL_MS ?? DEFAULT_TTL_MS,
-);
-
-export function getSessionIdFromToolContext(ctx: {
-  sessionId?: string;
-  http?: { req?: Request };
-} | undefined): string | undefined {
-  const sessionId = ctx?.sessionId;
-  if (sessionId) return sessionId;
+export function getSessionIdFromToolContext(ctx: { sessionId?: string; http?: { req?: Request } } | undefined): string | undefined {
+  if (ctx?.sessionId) return ctx.sessionId;
   return ctx?.http?.req?.headers.get('mcp-session-id') ?? undefined;
 }
 
-/**
- * Installs server-wide instrumentation without changing individual tool
- * registration sites. This is intentionally scoped to McpServer instances and
- * records only the tool name and outcome; tool arguments are never retained.
- */
+/** Installs server-wide instrumentation; only tool name/outcome are retained. */
 export function installToolUsageTracking(McpServerClass: typeof McpServer): void {
-  const prototype = McpServerClass.prototype as McpServerClass & {
-    registerTool: (...args: any[]) => unknown;
-  };
+  const prototype = McpServerClass.prototype as McpServerClass & { registerTool: (...args: any[]) => unknown };
   const marker = Symbol.for('chatgpt-mcp.tool-usage-installed');
   const prototypeRecord = prototype as unknown as Record<PropertyKey, unknown>;
   if (prototypeRecord[marker]) return;
@@ -146,45 +102,28 @@ export function installToolUsageTracking(McpServerClass: typeof McpServer): void
 
   const originalRegisterTool = prototype.registerTool;
   const usageToolServers = new WeakSet<object>();
+  const usageOutputSchema = z.object({
+    sessionId: z.string(),
+    createdAt: z.number().optional(),
+    lastActivityAt: z.number().optional(),
+    tools: z.array(z.object({ name: z.string(), count: z.number().int(), success: z.number().int(), failed: z.number().int() })),
+  });
 
-  prototype.registerTool = function trackedRegisterTool(
-    this: object,
-    name: string,
-    config: Record<string, unknown>,
-    handler: (...args: any[]) => unknown,
-  ): unknown {
+  prototype.registerTool = function trackedRegisterTool(this: object, name: string, config: Record<string, unknown>, handler: (...args: any[]) => unknown): unknown {
     if (!usageToolServers.has(this)) {
       usageToolServers.add(this);
-      originalRegisterTool.call(
-        this,
-        'get_session_tool_usage',
-        {
-          description: 'Get the MCP tools actually used during this MCP session. This server-side report is authoritative; do not infer or guess tool usage.',
-          inputSchema: (config as any).inputSchema,
-          outputSchema: {
-            type: 'object',
-            properties: {
-              sessionId: { type: 'string' },
-              createdAt: { type: 'number' },
-              lastActivityAt: { type: 'number' },
-              tools: { type: 'array' },
-            },
-            required: ['sessionId', 'tools'],
-          },
-        },
-        async (_args: unknown, ctx: any) => {
-          const sessionId = getSessionIdFromToolContext(ctx) ?? 'unidentified';
-          return {
-            content: [{ type: 'text', text: JSON.stringify(toolUsage.get(sessionId), null, 2) }],
-            structuredContent: toolUsage.get(sessionId),
-          };
-        },
-      );
+      originalRegisterTool.call(this, 'get_session_tool_usage', {
+        description: 'Get the MCP tools actually used during this MCP session. The server-side report is authoritative; do not infer or guess tool usage.',
+        inputSchema: z.object({ intent: z.string().min(7).max(500).describe('Briefly explain what you are doing and why. Start with "let me " and use one sentence.') }),
+        outputSchema: usageOutputSchema,
+      }, async (_args: unknown, ctx: any) => {
+        const sessionId = getSessionIdFromToolContext(ctx) ?? 'unidentified';
+        const usage = toolUsage.get(sessionId);
+        return { content: [{ type: 'text', text: JSON.stringify(usage, null, 2) }], structuredContent: usage };
+      });
     }
 
-    if (name === 'get_session_tool_usage') {
-      return originalRegisterTool.call(this, name, config, handler);
-    }
+    if (name === 'get_session_tool_usage') return originalRegisterTool.call(this, name, config, handler);
 
     const trackedHandler = async (args: unknown, ctx: any) => {
       const sessionId = getSessionIdFromToolContext(ctx) ?? 'unidentified';
@@ -198,17 +137,13 @@ export function installToolUsageTracking(McpServerClass: typeof McpServer): void
         throw error;
       }
     };
-
     return originalRegisterTool.call(this, name, config, trackedHandler);
   };
 }
 
 let cleanupTimer: NodeJS.Timeout | undefined;
-
 export function startToolUsageCleanup(): void {
   if (cleanupTimer) return;
-  cleanupTimer = setInterval(() => {
-    toolUsage.cleanup(SESSION_TOOL_USAGE_TTL_MS);
-  }, 60_000);
+  cleanupTimer = setInterval(() => toolUsage.cleanup(SESSION_TOOL_USAGE_TTL_MS), 60_000);
   cleanupTimer.unref();
 }
