@@ -23,7 +23,10 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 
 ### Development runtimes
 
-- `run_npm`
+- `npm_test`
+- `npm_run`
+- `npm_install`
+- `npm_init`
 - `run_python`
 - `run_node`
 - `git_status`
@@ -41,6 +44,10 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 
 Git is intentionally exposed as separate, operation-specific tools. There is no generic `git` MCP tool, so the model cannot select a Git subcommand such as `git apply`. File contents must be changed with `apply_patch`, `edit_file`, or `write_file`; Git tools are for repository inspection and version-control operations.
 
+npm is intentionally exposed as separate, semantic tools. Use `npm_test` for `npm test`, `npm_run` for an existing npm script, `npm_install` for `npm install`, and `npm_init` for `npm init`. There is no generic npm command tool, so the model cannot select an arbitrary npm subcommand.
+
+`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
+
 ### Browser / CDP
 
 - `cdp_version`
@@ -48,8 +55,6 @@ Git is intentionally exposed as separate, operation-specific tools. There is no 
 - `cdp_call`
 
 The CDP tools run inside the Windows agent and connect **only** to `http://127.0.0.1:9222`, so ChatGPT can reach a browser's local Chrome DevTools Protocol endpoint without exposing port 9222 to the network. `cdp_list_targets` returns the available browser targets; pass a target's `id` to `cdp_call` and use the normal CDP method name and parameters, for example `Runtime.evaluate` or `Page.navigate`.
-
-`rg`, `find_files`, and filesystem inspection do not require command execution. `run_npm`, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
 
 All paths are restricted to `AGENT_WORKSPACE`. Keep the agent running as a normal user, not Administrator.
 
@@ -66,9 +71,9 @@ WORKING RULES
 3. Prefer rg for code search. Do not enumerate large directories or read whole large files when a range is enough.
 4. Use the dedicated file-editing tools for file contents. Prefer apply_patch for normal source changes and multi-file edits; use edit_file for a small exact text replacement; use write_file only when creating or intentionally replacing an entire file.
 5. NEVER use git apply or git am to modify files. NEVER construct a patch and pass it to git, PowerShell, Bash, or another shell command to apply it.
-6. Treat Git tools as version-control tools, not file-editing tools. Use git_status and git_diff before and after meaningful changes. Use git_diff to inspect and verify edits; use git_add/git_commit only when the user asks for a commit or the workflow explicitly requires one.
+6. Treat Git tools as version-control tools, not file-editing tools. Use git_status and git_diff before and after meaningful changes. Use git_add/git_commit only when the user asks for a commit or the workflow explicitly requires one.
 7. Do not use Git tools to overwrite or discard working-tree changes. In particular, do not use checkout, restore, reset, or clean as a way to edit files or discard changes unless the user explicitly asks.
-8. After changing code, run the smallest relevant validation: run_npm, run_node, or run_python. If it is a Git project, use git_diff to verify the final change.
+8. After changing code, run the smallest relevant validation: npm_test, npm_run, or run_python/run_node. If it is a Git project, use git_diff to verify the final change.
 9. Do not run destructive commands, delete unrelated files, reset/clean a repository, force-push, or kill unrelated processes unless the user explicitly asks.
 10. Never expose secrets, tokens, .env contents, private keys, credentials, or unrelated personal files in the response.
 11. For long-running commands, use a bounded command where possible. Use process_list to inspect processes and kill_process only for a process you intentionally started.
@@ -90,7 +95,7 @@ BROWSER / CDP
 23. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
 
 PREFERRED CODING LOOP
-find_files -> rg -> read_file_range -> apply_patch/edit_file -> git_diff -> run_* -> git_diff
+find_files -> rg -> read_file_range -> apply_patch/edit_file -> git_diff -> npm_test/npm_run/run_* -> git_diff
 
 TOOL GUIDANCE
 - rg: search text/regex in the workspace; use glob to narrow by language.
@@ -99,7 +104,10 @@ TOOL GUIDANCE
 - edit_file: make a small exact text replacement. Prefer this when the intended change is localized and you know the exact old text.
 - apply_patch: apply a patch directly to workspace files. Prefer this for normal source edits and multi-file changes. Do not invoke git apply, git am, or a shell command to apply the patch.
 - write_file: create or intentionally replace a complete file; do not use it when a small edit or patch is sufficient.
-- run_npm: use for npm commands such as test, build, lint, install when appropriate.
+- npm_test: run the npm test lifecycle. Do not use it to select another npm subcommand.
+- npm_run: run one existing npm script; put the script name in args[0] and pass script arguments after `--`.
+- npm_install: install npm dependencies; extra arguments are passed directly to npm install.
+- npm_init: initialize an npm package; extra arguments are passed directly to npm init.
 - run_node: use for Node scripts or quick runtime checks.
 - run_python: use for Python scripts/tests.
 - git_status: inspect working-tree and staging state.
@@ -109,7 +117,7 @@ TOOL GUIDANCE
 - git_blame: inspect line-level file history.
 - git_branch: inspect or manage branches; do not use it to discard working-tree changes.
 - git_add: stage explicitly selected files when the workflow requires staging.
-- git_commit: create a commit when the user asks for one or the workflow explicitly requires one.
+- git_commit: create a Git commit when the user asks for one or the workflow explicitly requires one.
 - process_list / kill_process: manage processes started for development/testing.
 - cdp_version: verify that the local browser CDP endpoint is reachable.
 - cdp_list_targets: enumerate tabs/pages exposed by the local browser CDP endpoint.
@@ -119,7 +127,7 @@ TOOL GUIDANCE
 
 ## Repeatable coding-tool test
 
-The repository includes `tests/coding-tools.test.ts`, which creates an isolated temporary workspace and exercises every newly added coding tool. It covers successful operations plus path and process safety checks.
+The repository includes `tests/coding-tools.test.ts`, which creates an isolated temporary workspace and exercises every newly added coding tool. It covers successful operations plus path and process safety checks, including the four semantic npm tools.
 
 Run on the Windows agent after installing dependencies and ensuring `rg`, Node.js, npm, Python, and git are available:
 

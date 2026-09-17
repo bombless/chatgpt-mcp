@@ -131,7 +131,7 @@ async function exec(command: string, args: string[], cwd?: string, timeout = COM
 }
 
 function requireCommandExecution() {
-  if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable run_npm, run_python, run_node, git, apply_patch, and kill_process.');
+  if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
 }
 
 function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
@@ -264,6 +264,29 @@ async function command(name: 'npm' | 'python' | 'node', args: Record<string, unk
   catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
 }
 
+async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init', args: Record<string, unknown>, logCommand?: CommandLogger) {
+  const supplied = Array.isArray(args.args) ? args.args.map(String) : [];
+  let commandArgs: string[];
+  switch (tool) {
+    case 'npm_test':
+      commandArgs = ['test', ...supplied];
+      break;
+    case 'npm_run': {
+      const script = supplied.shift();
+      if (!script) throw new Error('npm_run requires a script name in args[0]');
+      commandArgs = ['run', script, ...(supplied.length ? ['--', ...supplied] : [])];
+      break;
+    }
+    case 'npm_install':
+      commandArgs = ['install', ...supplied];
+      break;
+    case 'npm_init':
+      commandArgs = ['init', ...supplied];
+      break;
+  }
+  return command('npm', { ...args, args: commandArgs }, logCommand);
+}
+
 async function runPython(args: Record<string, unknown>, logCommand?: CommandLogger) {
   if (args.async === true) return spawnPythonJob(args, logCommand);
   return command('python', args, logCommand);
@@ -364,7 +387,10 @@ async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLog
 
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
-    case 'run_npm': return command('npm', args, logCommand);
+    case 'npm_test': return runNpmTool('npm_test', args, logCommand);
+    case 'npm_run': return runNpmTool('npm_run', args, logCommand);
+    case 'npm_install': return runNpmTool('npm_install', args, logCommand);
+    case 'npm_init': return runNpmTool('npm_init', args, logCommand);
     case 'run_python': return runPython(args, logCommand);
     case 'python_job_inspect': return inspectPythonJob(args);
     case 'python_job_kill': return killPythonJob(args);

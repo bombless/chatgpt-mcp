@@ -19,6 +19,7 @@ const patchFile = path.join(root, 'patch.txt');
 try {
   await fs.writeFile(file, ['one', 'two', 'three', 'needle here', 'five'].join('\n'), 'utf8');
   await fs.writeFile(path.join(root, 'app.ts'), 'export const answer = 41;\n', 'utf8');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "console.log(42)"', lint: 'node -e "console.log(7)"' } }), 'utf8');
 
   const found = await call('find_files', { pattern: '*.ts' }) as any;
   assert.ok(found.files.some((x: string) => x.endsWith('app.ts')));
@@ -84,9 +85,25 @@ try {
 
   await assert.rejects(() => call('python_job_inspect', { jobId: 'missing-job' }), /was not found/);
 
-  const npm = await call('run_npm', { args: ['--version'] }) as any;
-  assert.equal(npm.code, 0);
-  assert.match(npm.stdout, /\d+\.\d+/);
+  const npmTest = await call('npm_test', { args: [] }) as any;
+  assert.equal(npmTest.code, 0);
+  assert.match(npmTest.stdout, /42/);
+
+  const npmRun = await call('npm_run', { args: ['lint', '--fix'] }) as any;
+  assert.equal(npmRun.code, 0);
+  assert.match(npmRun.stdout, /7/);
+  await assert.rejects(() => call('npm_run', { args: [] }), /npm_run requires a script name in args\[0\]/);
+
+  const npmInstall = await call('npm_install', { args: ['--ignore-scripts'] }) as any;
+  assert.equal(npmInstall.code, 0);
+  assert.match(npmInstall.stdout, /up to date|audited|added|packages/i);
+
+  const npmInitRoot = path.join(root, 'npm-init');
+  await call('create_directory', { path: npmInitRoot });
+  const npmInit = await call('npm_init', { args: ['--yes'], cwd: npmInitRoot }) as any;
+  assert.equal(npmInit.code, 0);
+  const initializedPackage = JSON.parse(await fs.readFile(path.join(npmInitRoot, 'package.json'), 'utf8'));
+  assert.equal(initializedPackage.name, path.basename(npmInitRoot));
 
   const gitInit = await call('git', { args: ['init'] }) as any;
   assert.equal(gitInit.code, 0);

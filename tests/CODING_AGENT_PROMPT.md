@@ -39,7 +39,11 @@ Rules:
 4. NODE / PYTHON / NPM
    - run_node with args that print 42
    - run_python with args that print 42
-   - run_npm with args ["--version"]
+   - npm_test with no arguments and verify the test lifecycle runs
+   - npm_run with args ["test"] and verify the named script runs
+   - npm_run with args [] and verify it fails with "npm_run requires a script name in args[0]"
+   - npm_install with args ["--ignore-scripts"] and verify the install command runs
+   - npm_init with args ["--yes"] in a fresh subdirectory and verify package.json is created
    - verify successful exit codes and expected output
 
 5. GIT
