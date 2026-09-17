@@ -128,14 +128,14 @@ function buildMcpServer() {
   codingTool('process_list', 'List running processes on the Windows machine.', { agentId: agentIdSchema }, z.object({ result: commandResultSchema }));
   codingTool('kill_process', 'Terminate a process by PID. Requires ALLOW_COMMAND_EXECUTION=true; refuses to kill the agent itself.', { agentId: agentIdSchema, pid: z.number().int().positive() }, z.object({ result: z.object({ ok: z.literal(true), pid: z.number().int() }) }));
   codingTool('rg', 'Search workspace text with ripgrep. Returns line and column matches.', { agentId: agentIdSchema, query: z.string().min(1), cwd: cwdSchema, glob: z.string().optional(), ignoreCase: z.boolean().optional(), maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int(), matches: z.boolean(), truncated: z.boolean() }) }));
-  gitTool('git_status', 'Inspect Git working-tree and staging state. This tool runs only `git status`; it cannot run other Git subcommands.', 'Inspect the Git working tree and staging state. Use this instead of a generic git command.');
-  gitTool('git_diff', 'Inspect Git diffs. This tool runs only `git diff`; it cannot run other Git subcommands.', 'Inspect Git changes with `git diff`. Use this to review edits; it cannot modify files.');
-  gitTool('git_log', 'Inspect Git commit history. This tool runs only `git log`; it cannot run other Git subcommands.', 'Inspect Git commit history with `git log`.');
-  gitTool('git_show', 'Inspect a Git object or commit. This tool runs only `git show`; it cannot run other Git subcommands.', 'Inspect a Git commit or object with `git show`.');
-  gitTool('git_blame', 'Inspect line history for a file. This tool runs only `git blame`; it cannot run other Git subcommands.', 'Inspect line-level Git history with `git blame`.');
-  gitTool('git_branch', 'Inspect or manage Git branches. This tool runs only `git branch`; it cannot run other Git subcommands.', 'Inspect or manage branches with `git branch`. Do not use it to discard working-tree changes.');
-  gitTool('git_add', 'Stage files for a Git commit. This tool runs only `git add`; it cannot run other Git subcommands.', 'Stage explicitly selected files with `git add`.');
-  gitTool('git_commit', 'Create a Git commit. This tool runs only `git commit`; it cannot run other Git subcommands.', 'Create a Git commit with `git commit`.');
+  gitTool('git_status', 'status', 'Inspect the Git working tree and staging state. Use this instead of a generic git command.');
+  gitTool('git_diff', 'diff', 'Inspect Git changes with `git diff`. Use this to review edits; it cannot modify files.');
+  gitTool('git_log', 'log', 'Inspect Git commit history with `git log`.');
+  gitTool('git_show', 'show', 'Inspect a Git commit or object with `git show`.');
+  gitTool('git_blame', 'blame', 'Inspect line-level Git history with `git blame`.');
+  gitTool('git_branch', 'branch', 'Inspect or manage branches with `git branch`. Do not use it to discard working-tree changes.');
+  gitTool('git_add', 'add', 'Stage explicitly selected files with `git add`.');
+  gitTool('git_commit', 'commit', 'Create a Git commit with `git commit`.');
   server.registerTool('apply_patch', { description: 'Apply a Codex-style patch directly through workspace file operations. This implementation never invokes git apply, git am, PowerShell, Bash, or another shell command. Supports *** Begin Patch with Add File, Update File, and Delete File operations.', inputSchema: input({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema }), outputSchema: z.object({ result: z.unknown() }) }, async ({ agentId, patch, cwd, intent }) => {
     const patchPath = (value: string) => cwd ? `${cwd.replace(/[\\/]+$/, '')}\\${value.replaceAll('/', '\\')}` : value;
     return resultContent(await applyNativePatch(patch, {
