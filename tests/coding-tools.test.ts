@@ -6,7 +6,7 @@ import path from 'node:path';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgpt-mcp-file-tools-'));
 process.env.AGENT_WORKSPACE = root;
 process.env.MAX_READ_FILE_BYTES = '64';
-process.env.MAX_READ_FILE_LINES = '3';
+process.env.MAX_READ_FILE_LINES = '4';
 
 const { readFile, replaceLines } = await import('../src/agent/file-tools.js');
 
@@ -56,10 +56,10 @@ try {
   assert.equal(outside.error.code, 'PATH_OUTSIDE_WORKSPACE');
 
   const large = path.join(root, 'large.txt');
-  await fs.writeFile(large, 'a\nb\nc\nd\n', 'utf8');
+  await fs.writeFile(large, 'a\nb\nc\nd\ne\n', 'utf8');
   const largeResult = await readFile({ path: large }) as any;
   assert.equal(largeResult.message !== undefined, true);
-  assert.equal(largeResult.lineCount, 4);
+  assert.equal(largeResult.lineCount, 5);
   const largeRange = await readFile({ path: large, startLine: 3, endLine: 4 }) as any;
   assert.equal(largeRange.numberedContent, '3 | c\n4 | d');
 
