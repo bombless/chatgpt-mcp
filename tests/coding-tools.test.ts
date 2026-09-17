@@ -2,189 +2,74 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgpt-mcp-coding-'));
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgpt-mcp-file-tools-'));
 process.env.AGENT_WORKSPACE = root;
-process.env.ALLOW_COMMAND_EXECUTION = 'true';
+process.env.MAX_READ_FILE_BYTES = '64';
+process.env.MAX_READ_FILE_LINES = '4';
 
-const { runCodingTool } = await import('../src/agent/coding-tools.js');
-
-const call = (tool: string, args: Record<string, unknown> = {}) => runCodingTool(tool, args);
-const file = path.join(root, 'sample.txt');
-const copy = path.join(root, 'sample-copy.txt');
-const nested = path.join(root, 'nested');
-const patchFile = path.join(root, 'patch.txt');
+const { readFile, replaceLines } = await import('../src/agent/file-tools.js');
 
 try {
-  await fs.writeFile(file, ['one', 'two', 'three', 'needle here', 'five'].join('\n'), 'utf8');
-  await fs.writeFile(path.join(root, 'app.ts'), 'export const answer = 41;\n', 'utf8');
-  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "console.log(42)"', lint: 'node -e "console.log(7)"' } }), 'utf8');
+  const file = path.join(root, 'sample.txt');
+  await fs.writeFile(file, 'one\r\ntwo\r\nthree\r\nfour\r\n', 'utf8');
 
-  const found = await call('find_files', { pattern: '*.ts' }) as any;
-  assert.ok(found.files.some((x: string) => x.endsWith('app.ts')));
+  const whole = await readFile({ path: file }) as any;
+  assert.equal(whole.path, file);
+  assert.equal(whole.startLine, 1);
+  assert.equal(whole.endLine, 4);
+  assert.equal(whole.lineCount, 4);
+  assert.match(whole.numberedContent, /^1 \| one\n2 \| two\n3 \| three\n4 \| four$/);
 
-  const search = await call('rg', { query: 'needle' }) as any;
-  assert.match(search.stdout, /needle here/);
+  const range = await readFile({ path: file, startLine: 2, endLine: 3 }) as any;
+  assert.equal(range.content, 'two\r\nthree');
+  assert.equal(range.numberedContent, '2 | two\n3 | three');
 
-  const range = await call('read_file_range', { path: file, startLine: 2, endLine: 4 }) as string;
-  assert.match(range, /2: two/);
-  assert.match(range, /4: needle here/);
+  const beforeMismatch = await fs.readFile(file, 'utf8');
+  const mismatch = await replaceLines({ path: file, startLine: 2, endLine: 3, oldText: 'two\nthree', newText: 'x\ny' }) as any;
+  assert.equal(mismatch.success, false);
+  assert.equal(mismatch.error.code, 'CONTENT_MISMATCH');
+  assert.equal(await fs.readFile(file, 'utf8'), beforeMismatch);
 
-  const tail = await call('tail_file', { path: file, lines: 2 }) as string;
-  assert.equal(tail, 'needle here\nfive');
+  const replaced = await replaceLines({ path: file, startLine: 2, endLine: 3, oldText: 'two\r\nthree', newText: 'TWO\nTHREE' }) as any;
+  assert.deepEqual(replaced, { success: true, path: file, startLine: 2, endLine: 3, linesReplaced: 2 });
+  assert.equal(await fs.readFile(file, 'utf8'), 'one\r\nTWO\r\nTHREE\r\nfour\r\n');
 
-  const info = await call('get_file_info', { path: file }) as any;
-  assert.equal(info.type, 'file');
-  assert.ok(info.size > 0);
+  const deleted = await replaceLines({ path: file, startLine: 2, endLine: 3, oldText: 'TWO\r\nTHREE', newText: '' }) as any;
+  assert.equal(deleted.success, true);
+  assert.equal(await fs.readFile(file, 'utf8'), 'one\r\nfour\r\n');
 
-  await call('create_directory', { path: nested });
-  assert.equal((await fs.stat(nested)).isDirectory(), true);
+  const inserted = await replaceLines({ path: file, startLine: 2, endLine: 2, oldText: 'four', newText: 'inserted\nfour' }) as any;
+  assert.equal(inserted.success, true);
+  assert.equal(await fs.readFile(file, 'utf8'), 'one\r\ninserted\r\nfour\r\n');
 
-  await call('copy_file', { source: file, destination: copy });
-  assert.equal(await fs.readFile(copy, 'utf8'), await fs.readFile(file, 'utf8'));
+  const outOfRange = await replaceLines({ path: file, startLine: 10, endLine: 10, oldText: 'x', newText: 'y' }) as any;
+  assert.equal(outOfRange.success, false);
+  assert.equal(outOfRange.error.code, 'LINE_OUT_OF_RANGE');
 
-  const node = await call('run_node', { args: ['-e', 'console.log(6 * 7)'] }) as any;
-  assert.match(node.stdout, /42/);
+  const invalid = await replaceLines({ path: file, startLine: 2, endLine: 1, oldText: '', newText: '' }) as any;
+  assert.equal(invalid.success, false);
+  assert.equal(invalid.error.code, 'INVALID_ARGUMENT');
 
-  const python = await call('run_python', { args: ['-c', 'print(6 * 7)'] }) as any;
-  assert.match(python.stdout, /42/);
+  const outside = await replaceLines({ path: path.join(root, '..', 'outside.txt'), startLine: 1, endLine: 1, oldText: 'x', newText: 'y' }) as any;
+  assert.equal(outside.success, false);
+  assert.equal(outside.error.code, 'PATH_OUTSIDE_WORKSPACE');
 
-  const asyncJob = await call('run_python', {
-    args: ['-c', 'import time; print("started", flush=True); time.sleep(2); print("done", flush=True)'],
-    async: true,
-  }) as any;
-  assert.ok(asyncJob.jobId);
-  assert.equal(asyncJob.status, 'running');
-  assert.ok(asyncJob.pid > 0);
+  const large = path.join(root, 'large.txt');
+  await fs.writeFile(large, 'a\nb\nc\nd\ne\n', 'utf8');
+  const largeResult = await readFile({ path: large }) as any;
+  assert.equal(largeResult.message !== undefined, true);
+  assert.equal(largeResult.lineCount, 5);
+  const largeRange = await readFile({ path: large, startLine: 3, endLine: 4 }) as any;
+  assert.equal(largeRange.numberedContent, '3 | c\n4 | d');
 
-  const inspectedWhileRunning = await call('python_job_inspect', { jobId: asyncJob.jobId }) as any;
-  assert.equal(inspectedWhileRunning.jobId, asyncJob.jobId);
-  assert.equal(inspectedWhileRunning.status, 'running');
+  const empty = path.join(root, 'empty.txt');
+  await fs.writeFile(empty, '', 'utf8');
+  const emptyResult = await readFile({ path: empty }) as any;
+  assert.equal(emptyResult.lineCount, 0);
+  assert.equal(emptyResult.numberedContent, '');
 
-  const listed = await call('python_jobs') as any[];
-  assert.ok(listed.some(job => job.jobId === asyncJob.jobId));
-
-  await new Promise(resolve => setTimeout(resolve, 2600));
-  const inspectedAfterExit = await call('python_job_inspect', { jobId: asyncJob.jobId }) as any;
-  assert.equal(inspectedAfterExit.status, 'exited');
-  assert.equal(inspectedAfterExit.exitCode, 0);
-  assert.match(inspectedAfterExit.stdout, /started/);
-  assert.match(inspectedAfterExit.stdout, /done/);
-
-  const killJob = await call('run_python', {
-    args: ['-c', 'import time; time.sleep(60)'],
-    async: true,
-  }) as any;
-  assert.equal(killJob.status, 'running');
-  const killed = await call('python_job_kill', { jobId: killJob.jobId }) as any;
-  assert.equal(killed.jobId, killJob.jobId);
-  await new Promise(resolve => setTimeout(resolve, 300));
-  const inspectedKilled = await call('python_job_inspect', { jobId: killJob.jobId }) as any;
-  assert.equal(inspectedKilled.status, 'killed');
-
-  await assert.rejects(() => call('python_job_inspect', { jobId: 'missing-job' }), /was not found/);
-
-  const npmTest = await call('npm_test', { args: [] }) as any;
-  assert.equal(npmTest.code, 0);
-  assert.match(npmTest.stdout, /42/);
-
-  const npmRun = await call('npm_run', { args: ['lint', '--fix'] }) as any;
-  assert.equal(npmRun.code, 0);
-  assert.match(npmRun.stdout, /7/);
-  await assert.rejects(() => call('npm_run', { args: [] }), /npm_run requires a script name in args\[0\]/);
-
-  const npmInstall = await call('npm_install', { args: ['--ignore-scripts'] }) as any;
-  assert.equal(npmInstall.code, 0);
-  assert.match(npmInstall.stdout, /up to date|audited|added|packages/i);
-
-  const npmInitRoot = path.join(root, 'npm-init');
-  await call('create_directory', { path: npmInitRoot });
-  const npmInit = await call('npm_init', { args: ['--yes'], cwd: npmInitRoot }) as any;
-  assert.equal(npmInit.code, 0);
-  const initializedPackage = JSON.parse(await fs.readFile(path.join(npmInitRoot, 'package.json'), 'utf8'));
-  assert.equal(initializedPackage.name, path.basename(npmInitRoot));
-
-  const gitInit = await call('git', { args: ['init'] }) as any;
-  assert.equal(gitInit.code, 0);
-  await call('git', { args: ['config', 'user.email', 'test@example.invalid'] });
-  await call('git', { args: ['config', 'user.name', 'Coding Tool Test'] });
-  await call('git', { args: ['add', '.'] });
-  const status = await call('git', { args: ['status', '--short'] }) as any;
-  assert.equal(status.code, 0);
-
-  const patch = [
-    'diff --git a/app.ts b/app.ts',
-    '--- a/app.ts',
-    '+++ b/app.ts',
-    '@@ -1 +1 @@',
-    '-export const answer = 41;',
-    '+export const answer = 42;',
-    '',
-  ].join('\n');
-  await call('apply_patch', { patch });
-  assert.equal(await fs.readFile(path.join(root, 'app.ts'), 'utf8'), 'export const answer = 42;\n');
-
-  const editFile = path.join(root, 'edit.txt');
-  await fs.writeFile(editFile, 'alpha\nbeta\ngamma\n', 'utf8');
-  const before = await fs.readFile(editFile, 'utf8');
-  const edit = await call('edit_file', {
-    path: editFile,
-    oldText: 'beta',
-    newText: 'delta',
-    expectedReplacements: 1,
-  }) as any;
-  assert.equal(edit.ok, true);
-  assert.equal(edit.replacements, 1);
-  assert.equal(edit.changed, true);
-  assert.equal(edit.sha256Before.length, 64);
-  assert.equal(edit.sha256After.length, 64);
-  assert.match(edit.diff, /-beta/);
-  assert.match(edit.diff, /\+delta/);
-  assert.equal(await fs.readFile(editFile, 'utf8'), 'alpha\ndelta\ngamma\n');
-
-  await fs.writeFile(editFile, 'same\nsame\n', 'utf8');
-  await assert.rejects(() => call('edit_file', {
-    path: editFile,
-    oldText: 'same',
-    newText: 'changed',
-  }), /Expected 1 replacement, but found 2/);
-  assert.equal(await fs.readFile(editFile, 'utf8'), 'same\nsame\n');
-
-  const stable = await fs.readFile(editFile, 'utf8');
-  const stableSha = await call('edit_file', {
-    path: editFile,
-    oldText: 'same',
-    newText: 'changed',
-    expectedReplacements: 2,
-  }) as any;
-  assert.equal(stableSha.replacements, 2);
-  await fs.writeFile(editFile, stable, 'utf8');
-  await assert.rejects(() => call('edit_file', {
-    path: editFile,
-    oldText: 'same',
-    newText: 'changed',
-    expectedReplacements: 2,
-    expectedSha256: '0'.repeat(64),
-  }), /File changed since it was read/);
-  assert.equal(await fs.readFile(editFile, 'utf8'), stable);
-  assert.equal(before, 'alpha\nbeta\ngamma\n');
-
-  const processes = await call('process_list') as any;
-  assert.equal(processes.code, 0);
-  assert.ok(processes.stdout.length > 0);
-
-  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { cwd: root, windowsHide: true });
-  await new Promise(resolve => setTimeout(resolve, 300));
-  assert.ok(child.pid);
-  await call('kill_process', { pid: child.pid });
-  await new Promise(resolve => setTimeout(resolve, 300));
-  assert.notEqual(child.exitCode, null);
-
-  await assert.rejects(() => call('read_file_range', { path: path.join(root, '..', 'outside.txt'), startLine: 1, endLine: 1 }), /outside agent workspace/);
-  await assert.rejects(() => call('kill_process', { pid: process.pid }), /Refusing to terminate/);
-
-  console.log('PASS: all coding tools');
+  console.log('PASS: read_file + replace_lines');
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

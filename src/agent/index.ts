@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import WebSocket from 'ws';
 import type { AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
 import { runCodingTool } from './coding-tools.js';
+import { readFile, replaceLines } from './file-tools.js';
 
 const execFileAsync = promisify(execFile);
 const SERVER_URL = process.env.SERVER_URL ?? 'ws://127.0.0.1:8787/agent';
@@ -30,22 +31,14 @@ function assertAllowed(target: string, operation: string) {
   return resolved;
 }
 
-function logCommand(command: string, cwd?: string) {
-  console.log(`[agent] $ ${command}${cwd ? ` (cwd: ${cwd})` : ''}`);
-}
+function logCommand(command: string, cwd?: string) { console.log(`[agent] $ ${command}${cwd ? ` (cwd: ${cwd})` : ''}`); }
 
 async function run(request: AgentRequest): Promise<unknown> {
   switch (request.tool as ToolName) {
-    case 'read_file': {
-      const file = assertAllowed(String(request.args.path), 'read_file');
-      return await fs.readFile(file, 'utf8');
-    }
-    case 'write_file': {
-      const file = assertAllowed(String(request.args.path), 'write_file');
-      const content = String(request.args.content);
-      await fs.writeFile(file, content, 'utf8');
-      return { ok: true, path: file };
-    }
+    case 'read_file':
+      return await readFile(request.args);
+    case 'replace_lines':
+      return await replaceLines(request.args);
     case 'list_directory': {
       const dir = assertAllowed(String(request.args.path), 'list_directory');
       const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -71,9 +64,7 @@ async function run(request: AgentRequest): Promise<unknown> {
       try {
         const result = await execFileAsync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: MAX_OUTPUT_BYTES });
         return { stdout: result.stdout, stderr: result.stderr, code: 0 };
-      } catch (error: any) {
-        return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 };
-      }
+      } catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
     }
     case 'execute_bash': {
       if (!LINUX_MODE) throw new Error('execute_bash is only available in Linux mode; start the agent with --linux.');
@@ -83,9 +74,7 @@ async function run(request: AgentRequest): Promise<unknown> {
       try {
         const result = await execFileAsync('/bin/bash', ['-lc', command], { maxBuffer: MAX_OUTPUT_BYTES });
         return { stdout: result.stdout, stderr: result.stderr, code: 0 };
-      } catch (error: any) {
-        return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 };
-      }
+      } catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
     }
     case 'get_system_info':
       return { hostname: os.hostname(), platform: process.platform, arch: process.arch, release: os.release(), workspace: WORKSPACE_ROOT, commandExecutionEnabled: ALLOW_COMMAND_EXECUTION };
@@ -106,8 +95,7 @@ function connect() {
     if (request.type !== 'request' || !request.id || !request.tool) return;
     const intent = typeof request.args?.intent === 'string' ? request.args.intent.trim() : '';
     const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
-    if (intent) console.log(`[agent][${time}] intent: ${intent}`);
-    else console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`);
+    if (intent) console.log(`[agent][${time}] intent: ${intent}`); else console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`);
     const response: AgentResponse = { type: 'response', id: request.id, ok: false };
     try { response.result = await run(request); response.ok = true; }
     catch (error) { response.error = error instanceof Error ? error.message : String(error); }
