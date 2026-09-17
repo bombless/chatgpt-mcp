@@ -9,6 +9,8 @@ const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
 const MAX_SEARCH_RESULTS = Number(process.env.MAX_SEARCH_RESULTS ?? 500);
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS ?? 120_000);
+const MAX_READ_FILE_BYTES = Number(process.env.MAX_READ_FILE_BYTES ?? 512_000);
+const MAX_READ_FILE_LINES = Number(process.env.MAX_READ_FILE_LINES ?? 4_000);
 const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
 const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (process.platform === 'linux' ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
 
@@ -65,61 +67,123 @@ async function writeFileAtomic(file: string, content: string) {
   }
 }
 
-function sha256(content: string) {
-  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+function splitPhysicalLines(content: string) {
+  const newline = content.includes('\r\n') ? '\r\n' : '\n';
+  const trailingNewline = content.endsWith('\r\n') || content.endsWith('\n');
+  let lines = content.split(/\r\n|\n/);
+  if (trailingNewline) lines = lines.slice(0, -1);
+  return { lines, newline, trailingNewline };
 }
 
-async function editFile(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
-  const oldText = stringArg(args, 'oldText');
-  const newText = typeof args.newText === 'string' ? args.newText : undefined;
-  if (newText === undefined) throw new Error('newText must be a string');
-  if (oldText === newText) throw new Error('oldText and newText must be different');
+function lineCount(content: string) {
+  return splitPhysicalLines(content).lines.length;
+}
+
+function numberedContent(lines: string[], startLine: number) {
+  return lines.map((line, index) => `${startLine + index} | ${line}`).join('\n');
+}
+
+function invalidArgument(message: string) {
+  return { success: false, error: { code: 'INVALID_ARGUMENT', message } };
+}
+
+async function readFile(args: Record<string, unknown>) {
+  const pathArg = args.path;
+  if (typeof pathArg !== 'string' || !pathArg) return invalidArgument('path must be a non-empty string');
+  if (args.startLine !== undefined && (!Number.isInteger(args.startLine) || Number(args.startLine) < 1)) return invalidArgument('startLine must be a positive integer');
+  if (args.endLine !== undefined && (!Number.isInteger(args.endLine) || Number(args.endLine) < 1)) return invalidArgument('endLine must be a positive integer');
+  const startLine = args.startLine === undefined ? undefined : Number(args.startLine);
+  const endLine = args.endLine === undefined ? undefined : Number(args.endLine);
+  if (startLine !== undefined && endLine !== undefined && endLine < startLine) return invalidArgument('endLine must be greater than or equal to startLine');
+
+  let file: string;
+  try { file = assertAllowed(pathArg); } catch { return { success: false, error: { code: 'PATH_OUTSIDE_WORKSPACE', path: pathArg } }; }
+  const content = await fs.readFile(file, 'utf8');
+  const stat = await fs.stat(file);
+  const parsed = splitPhysicalLines(content);
+  const totalLines = parsed.lines.length;
+  const requestedStart = startLine ?? 1;
+  const requestedEnd = endLine ?? totalLines;
+
+  if (requestedStart > Math.max(totalLines, 1) || requestedEnd > totalLines) {
+    if (totalLines === 0 && requestedStart === 1 && requestedEnd === 0) {
+      return { path: file, startLine: 1, endLine: 0, lineCount: 0, content: '', numberedContent: '' };
+    }
+    return { success: false, error: { code: 'LINE_OUT_OF_RANGE', path: file, startLine: requestedStart, endLine: requestedEnd, lineCount: totalLines } };
+  }
+
+  if (startLine === undefined && (stat.size > MAX_READ_FILE_BYTES || totalLines > MAX_READ_FILE_LINES)) {
+    return {
+      path: file,
+      lineCount: totalLines,
+      size: stat.size,
+      message: `File has ${totalLines} lines and is ${stat.size} bytes. Full file output is too large. Please specify startLine and endLine.`,
+    };
+  }
+
+  const selected = parsed.lines.slice(requestedStart - 1, requestedEnd);
+  return {
+    path: file,
+    startLine: requestedStart,
+    endLine: requestedEnd,
+    lineCount: totalLines,
+    content: selected.join(parsed.newline),
+    numberedContent: numberedContent(selected, requestedStart),
+  };
+}
+
+async function replaceLines(args: Record<string, unknown>) {
+  const pathArg = args.path;
+  const startLine = args.startLine;
+  const endLine = args.endLine;
+  const oldText = args.oldText;
+  const newText = args.newText;
+
+  if (typeof pathArg !== 'string' || !pathArg) return invalidArgument('path must be a non-empty string');
+  if (!Number.isInteger(startLine) || Number(startLine) < 1) return invalidArgument('startLine must be a positive integer');
+  if (!Number.isInteger(endLine) || Number(endLine) < 1) return invalidArgument('endLine must be a positive integer');
+  if (Number(endLine) < Number(startLine)) return invalidArgument('endLine must be greater than or equal to startLine');
+  if (typeof oldText !== 'string') return invalidArgument('oldText must be a string');
+  if (typeof newText !== 'string') return invalidArgument('newText must be a string');
+
+  let file: string;
+  try { file = assertAllowed(pathArg); } catch { return { success: false, error: { code: 'PATH_OUTSIDE_WORKSPACE', path: pathArg } }; }
 
   const content = await fs.readFile(file, 'utf8');
-  const expectedSha256 = typeof args.expectedSha256 === 'string' && args.expectedSha256 ? args.expectedSha256.toLowerCase() : undefined;
-  const beforeSha256 = sha256(content);
-  if (expectedSha256 && beforeSha256 !== expectedSha256) {
-    throw new Error(`File changed since it was read: expected sha256 ${expectedSha256}, current sha256 ${beforeSha256}`);
+  const parsed = splitPhysicalLines(content);
+  const first = Number(startLine);
+  const last = Number(endLine);
+  if (last > parsed.lines.length) {
+    return { success: false, error: { code: 'LINE_OUT_OF_RANGE', path: file, startLine: first, endLine: last, lineCount: parsed.lines.length } };
   }
 
-  let replacements = 0;
-  let cursor = 0;
-  while (true) {
-    const index = content.indexOf(oldText, cursor);
-    if (index === -1) break;
-    replacements += 1;
-    cursor = index + oldText.length;
+  const actualText = parsed.lines.slice(first - 1, last).join(parsed.newline);
+  if (actualText !== oldText) {
+    return {
+      success: false,
+      error: {
+        code: 'CONTENT_MISMATCH',
+        path: file,
+        startLine: first,
+        endLine: last,
+        expected: oldText,
+        actual: actualText,
+      },
+    };
   }
 
-  const expectedReplacements = args.expectedReplacements === undefined ? 1 : Number(args.expectedReplacements);
-  if (!Number.isInteger(expectedReplacements) || expectedReplacements < 1) throw new Error('expectedReplacements must be a positive integer');
-  if (replacements !== expectedReplacements) {
-    throw new Error(`Expected ${expectedReplacements} replacement${expectedReplacements === 1 ? '' : 's'}, but found ${replacements}`);
-  }
-
-  const updated = content.split(oldText).join(newText);
+  const normalizedNewText = newText.replace(/\r\n|\n/g, parsed.newline);
+  const replacementLines = normalizedNewText === '' ? [] : normalizedNewText.split(parsed.newline);
+  const updatedLines = [...parsed.lines.slice(0, first - 1), ...replacementLines, ...parsed.lines.slice(last)];
+  const updated = updatedLines.join(parsed.newline) + (parsed.trailingNewline && updatedLines.length > 0 ? parsed.newline : '');
   await writeFileAtomic(file, updated);
-  const afterSha256 = sha256(updated);
-  const beforeLines = oldText.split(/\r?\n/);
-  const afterLines = newText.split(/\r?\n/);
-  const firstLine = content.slice(0, content.indexOf(oldText)).split(/\r?\n/).length;
-  const diff = [
-    `@@ -${firstLine},${beforeLines.length} +${firstLine},${afterLines.length} @@`,
-    ...beforeLines.map(line => `-${line}`),
-    ...afterLines.map(line => `+${line}`),
-  ].join('\n');
 
   return {
-    ok: true,
+    success: true,
     path: file,
-    changed: true,
-    replacements,
-    bytesBefore: Buffer.byteLength(content, 'utf8'),
-    bytesAfter: Buffer.byteLength(updated, 'utf8'),
-    sha256Before: beforeSha256,
-    sha256After: afterSha256,
-    diff,
+    startLine: first,
+    endLine: last,
+    linesReplaced: last - first + 1,
   };
 }
 
@@ -153,125 +217,29 @@ function spawnPythonJob(args: Record<string, unknown>, logCommand?: CommandLogge
   const executable = pythonExecutable();
   const commandLine = [executable, ...commandArgs].map(arg => /\s|["']/u.test(arg) ? JSON.stringify(arg) : arg).join(' ');
   logCommand?.(commandLine, workingDirectory);
-
   const child = spawn(executable, commandArgs, { cwd: workingDirectory, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
   const jobId = cryptoRandomId();
-  const job: PythonJob = {
-    jobId,
-    pid: child.pid ?? -1,
-    command: commandLine,
-    cwd: workingDirectory,
-    args: commandArgs,
-    startedAt: new Date().toISOString(),
-    status: 'running',
-    exitCode: null,
-    signal: null,
-    stdout: '',
-    stderr: '',
-    stdoutTruncated: false,
-    stderrTruncated: false,
-    child,
-  };
+  const job: PythonJob = { jobId, pid: child.pid ?? -1, command: commandLine, cwd: workingDirectory, args: commandArgs, startedAt: new Date().toISOString(), status: 'running', exitCode: null, signal: null, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false, child };
   pythonJobs.set(jobId, job);
-
-  child.stdout?.on('data', chunk => {
-    const result = appendLimited(job.stdout, chunk);
-    job.stdout = result.value;
-    job.stdoutTruncated ||= result.truncated;
-  });
-  child.stderr?.on('data', chunk => {
-    const result = appendLimited(job.stderr, chunk);
-    job.stderr = result.value;
-    job.stderrTruncated ||= result.truncated;
-  });
-  child.once('error', error => {
-    job.stderr = appendLimited(job.stderr, error.message).value;
-    if (job.status === 'running') job.status = 'failed';
-  });
-  child.once('close', (code, signal) => {
-    job.finishedAt = new Date().toISOString();
-    job.exitCode = code;
-    job.signal = signal;
-    if (job.status === 'running') job.status = code === 0 ? 'exited' : 'failed';
-  });
-
-  return {
-    jobId,
-    pid: job.pid,
-    status: job.status,
-    command: job.command,
-    cwd: job.cwd,
-    startedAt: job.startedAt,
-  };
+  child.stdout?.on('data', chunk => { const result = appendLimited(job.stdout, chunk); job.stdout = result.value; job.stdoutTruncated ||= result.truncated; });
+  child.stderr?.on('data', chunk => { const result = appendLimited(job.stderr, chunk); job.stderr = result.value; job.stderrTruncated ||= result.truncated; });
+  child.once('error', error => { job.stderr = appendLimited(job.stderr, error.message).value; if (job.status === 'running') job.status = 'failed'; });
+  child.once('close', (code, signal) => { job.finishedAt = new Date().toISOString(); job.exitCode = code; job.signal = signal; if (job.status === 'running') job.status = code === 0 ? 'exited' : 'failed'; });
+  return { jobId, pid: job.pid, status: job.status, command: job.command, cwd: job.cwd, startedAt: job.startedAt };
 }
 
-function cryptoRandomId() {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function publicJob(job: PythonJob) {
-  return {
-    jobId: job.jobId,
-    pid: job.pid,
-    status: job.status,
-    command: job.command,
-    cwd: job.cwd,
-    args: job.args,
-    startedAt: job.startedAt,
-    finishedAt: job.finishedAt ?? null,
-    exitCode: job.exitCode,
-    signal: job.signal,
-    stdout: job.stdout,
-    stderr: job.stderr,
-    stdoutTruncated: job.stdoutTruncated,
-    stderrTruncated: job.stderrTruncated,
-  };
-}
-
-function inspectPythonJob(args: Record<string, unknown>) {
-  const jobId = stringArg(args, 'jobId');
-  const job = pythonJobs.get(jobId);
-  if (!job) throw new Error(`Python job '${jobId}' was not found`);
-  return publicJob(job);
-}
-
-async function killPythonJob(args: Record<string, unknown>) {
-  requireCommandExecution();
-  const jobId = stringArg(args, 'jobId');
-  const job = pythonJobs.get(jobId);
-  if (!job) throw new Error(`Python job '${jobId}' was not found`);
-  if (job.status !== 'running') return publicJob(job);
-
-  if (process.platform === 'win32') {
-    await exec('taskkill.exe', ['/PID', String(job.pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS);
-  } else {
-    job.child.kill('SIGTERM');
-  }
-  job.status = 'killed';
-  return publicJob(job);
-}
-
-function listPythonJobs() {
-  return [...pythonJobs.values()].map(publicJob).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-}
+function cryptoRandomId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`; }
+function publicJob(job: PythonJob) { return { jobId: job.jobId, pid: job.pid, status: job.status, command: job.command, cwd: job.cwd, args: job.args, startedAt: job.startedAt, finishedAt: job.finishedAt ?? null, exitCode: job.exitCode, signal: job.signal, stdout: job.stdout, stderr: job.stderr, stdoutTruncated: job.stdoutTruncated, stderrTruncated: job.stderrTruncated }; }
+function inspectPythonJob(args: Record<string, unknown>) { const jobId = stringArg(args, 'jobId'); const job = pythonJobs.get(jobId); if (!job) throw new Error(`Python job '${jobId}' was not found`); return publicJob(job); }
+async function killPythonJob(args: Record<string, unknown>) { requireCommandExecution(); const jobId = stringArg(args, 'jobId'); const job = pythonJobs.get(jobId); if (!job) throw new Error(`Python job '${jobId}' was not found`); if (job.status !== 'running') return publicJob(job); if (process.platform === 'win32') await exec('taskkill.exe', ['/PID', String(job.pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS); else job.child.kill('SIGTERM'); job.status = 'killed'; return publicJob(job); }
+function listPythonJobs() { return [...pythonJobs.values()].map(publicJob).sort((a, b) => a.startedAt.localeCompare(b.startedAt)); }
 
 async function command(name: 'npm' | 'python' | 'node', args: Record<string, unknown>, logCommand?: CommandLogger) {
   requireCommandExecution();
   const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
   const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
-
-  // npm is a .cmd wrapper on Windows. Node's execFile/spawn cannot execute
-  // .cmd files directly with shell:false and reports `spawn EINVAL` on
-  // current Node releases. Do not switch to shell:true here: npm arguments
-  // are model/user input and must not become shell syntax. Launch npm's JS
-  // entry point directly with the current Node executable instead.
-  const executable = process.platform === 'win32' && name === 'npm'
-    ? process.execPath
-    : name;
-  const executableArgs = process.platform === 'win32' && name === 'npm'
-    ? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...commandArgs]
-    : commandArgs;
-
+  const executable = process.platform === 'win32' && name === 'npm' ? process.execPath : name;
+  const executableArgs = process.platform === 'win32' && name === 'npm' ? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...commandArgs] : commandArgs;
   try { return await exec(executable, executableArgs, cwd, COMMAND_TIMEOUT_MS, logCommand); }
   catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
 }
@@ -280,29 +248,14 @@ async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_in
   const supplied = Array.isArray(args.args) ? args.args.map(String) : [];
   let commandArgs: string[];
   switch (tool) {
-    case 'npm_test':
-      commandArgs = ['test', ...supplied];
-      break;
-    case 'npm_run': {
-      const script = supplied.shift();
-      if (!script) throw new Error('npm_run requires a script name in args[0]');
-      commandArgs = ['run', script, ...(supplied.length ? ['--', ...supplied] : [])];
-      break;
-    }
-    case 'npm_install':
-      commandArgs = ['install', ...supplied];
-      break;
-    case 'npm_init':
-      commandArgs = ['init', ...supplied];
-      break;
+    case 'npm_test': commandArgs = ['test', ...supplied]; break;
+    case 'npm_run': { const script = supplied.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); commandArgs = ['run', script, ...(supplied.length ? ['--', ...supplied] : [])]; break; }
+    case 'npm_install': commandArgs = ['install', ...supplied]; break;
+    case 'npm_init': commandArgs = ['init', ...supplied]; break;
   }
   return command('npm', { ...args, args: commandArgs }, logCommand);
 }
-
-async function runPython(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  if (args.async === true) return spawnPythonJob(args, logCommand);
-  return command('python', args, logCommand);
-}
+async function runPython(args: Record<string, unknown>, logCommand?: CommandLogger) { if (args.async === true) return spawnPythonJob(args, logCommand); return command('python', args, logCommand); }
 
 async function rg(args: Record<string, unknown>, logCommand?: CommandLogger) {
   const query = stringArg(args, 'query');
@@ -313,89 +266,15 @@ async function rg(args: Record<string, unknown>, logCommand?: CommandLogger) {
   if (typeof args.glob === 'string' && args.glob) rgArgs.push('--glob', args.glob);
   rgArgs.push(query, '.');
   try { return { ...(await exec('rg', rgArgs, cwd, COMMAND_TIMEOUT_MS, logCommand)), matches: true, truncated: false }; }
-  catch (error: any) {
-    const code = typeof error.code === 'number' ? error.code : 1;
-    if (code === 1) return { stdout: '', stderr: '', code: 1, matches: false, truncated: false };
-    throw new Error(String(error.stderr ?? error.message ?? error));
-  }
+  catch (error: any) { const code = typeof error.code === 'number' ? error.code : 1; if (code === 1) return { stdout: '', stderr: '', code: 1, matches: false, truncated: false }; throw new Error(String(error.stderr ?? error.message ?? error)); }
 }
-
-async function findFiles(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  const root = args.cwd ? assertAllowed(stringArg(args, 'cwd')) : WORKSPACE_ROOT;
-  const pattern = typeof args.pattern === 'string' && args.pattern ? args.pattern : '**/*';
-  const maxResults = Math.max(1, Math.min(MAX_SEARCH_RESULTS, Number(args.maxResults ?? MAX_SEARCH_RESULTS)));
-  const result = await exec('rg', ['--files', '--hidden', '--glob', '!.git/**', '--glob', pattern], root, COMMAND_TIMEOUT_MS, logCommand);
-  const files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, maxResults);
-  return { files, truncated: files.length >= maxResults, count: files.length };
-}
-
-async function readFileRange(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
-  const start = Math.max(1, Number(args.startLine ?? 1));
-  const end = Math.max(start, Number(args.endLine ?? start + 199));
-  const content = await fs.readFile(file, 'utf8');
-  const lines = content.split(/\r?\n/).slice(start - 1, end);
-  return lines.map((line, i) => `${start + i}: ${line}`).join('\n');
-}
-
-async function tailFile(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
-  const lines = Math.max(1, Number(args.lines ?? 100));
-  const content = await fs.readFile(file, 'utf8');
-  return content.split(/\r?\n/).slice(-lines).join('\n');
-}
-
-async function fileInfo(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
-  const stat = await fs.stat(file);
-  return { path: file, type: stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'other', size: stat.size, mtime: stat.mtime.toISOString(), mode: stat.mode };
-}
-
-async function createDirectory(args: Record<string, unknown>) {
-  const directory = assertAllowed(stringArg(args, 'path'));
-  await fs.mkdir(directory, { recursive: true });
-  return { ok: true, path: directory };
-}
-
-async function copyFile(args: Record<string, unknown>) {
-  const source = assertAllowed(stringArg(args, 'source'));
-  const destination = assertAllowed(stringArg(args, 'destination'));
-  await fs.copyFile(source, destination);
-  return { ok: true, source, destination };
-}
-
-async function processList(logCommand?: CommandLogger) {
-  if (process.platform === 'win32') return await exec('tasklist', ['/FO', 'CSV', '/NH'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand);
-  return await exec('ps', ['-eo', 'pid,ppid,comm,args'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand);
-}
-
-async function killProcess(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  requireCommandExecution();
-  const pid = Number(args.pid);
-  if (!Number.isInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
-  if (pid === process.pid) throw new Error('Refusing to terminate the agent process');
-  if (process.platform === 'win32') await exec('taskkill', ['/PID', String(pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand); else await exec('kill', ['-TERM', String(pid)], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand);
-  return { ok: true, pid };
-}
-
-async function git(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  requireCommandExecution();
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
-  const gitArgs = Array.isArray(args.args) ? args.args.map(String) : [];
-  if (!gitArgs.length) throw new Error('args must contain a git subcommand');
-  return await exec(process.platform === 'win32' ? 'git.exe' : 'git', gitArgs, cwd, COMMAND_TIMEOUT_MS, logCommand);
-}
-
-async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  requireCommandExecution();
-  const patch = stringArg(args, 'patch');
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
-  const temp = path.join(WORKSPACE_ROOT, `.mcp-patch-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`);
-  try {
-    await fs.writeFile(temp, patch, 'utf8');
-    return await exec(process.platform === 'win32' ? 'git.exe' : 'git', ['apply', '--whitespace=nowarn', temp], cwd, COMMAND_TIMEOUT_MS, logCommand);
-  } finally { await fs.rm(temp, { force: true }); }
-}
+async function findFiles(args: Record<string, unknown>, logCommand?: CommandLogger) { const root = args.cwd ? assertAllowed(stringArg(args, 'cwd')) : WORKSPACE_ROOT; const pattern = typeof args.pattern === 'string' && args.pattern ? args.pattern : '**/*'; const maxResults = Math.max(1, Math.min(MAX_SEARCH_RESULTS, Number(args.maxResults ?? MAX_SEARCH_RESULTS))); const result = await exec('rg', ['--files', '--hidden', '--glob', '!.git/**', '--glob', pattern], root, COMMAND_TIMEOUT_MS, logCommand); const files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, maxResults); return { files, truncated: files.length >= maxResults, count: files.length }; }
+async function fileInfo(args: Record<string, unknown>) { const file = assertAllowed(stringArg(args, 'path')); const stat = await fs.stat(file); return { path: file, type: stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'other', size: stat.size, mtime: stat.mtime.toISOString(), mode: stat.mode }; }
+async function createDirectory(args: Record<string, unknown>) { const directory = assertAllowed(stringArg(args, 'path')); await fs.mkdir(directory, { recursive: true }); return { ok: true, path: directory }; }
+async function copyFile(args: Record<string, unknown>) { const source = assertAllowed(stringArg(args, 'source')); const destination = assertAllowed(stringArg(args, 'destination')); await fs.copyFile(source, destination); return { ok: true, source, destination }; }
+async function processList(logCommand?: CommandLogger) { if (process.platform === 'win32') return await exec('tasklist', ['/FO', 'CSV', '/NH'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand); return await exec('ps', ['-eo', 'pid,ppid,comm,args'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand); }
+async function killProcess(args: Record<string, unknown>, logCommand?: CommandLogger) { requireCommandExecution(); const pid = Number(args.pid); if (!Number.isInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer'); if (pid === process.pid) throw new Error('Refusing to terminate the agent process'); if (process.platform === 'win32') await exec('taskkill', ['/PID', String(pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand); else await exec('kill', ['-TERM', String(pid)], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand); return { ok: true, pid }; }
+async function git(args: Record<string, unknown>, logCommand?: CommandLogger) { requireCommandExecution(); const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT; const gitArgs = Array.isArray(args.args) ? args.args.map(String) : []; if (!gitArgs.length) throw new Error('args must contain a git subcommand'); return await exec(process.platform === 'win32' ? 'git.exe' : 'git', gitArgs, cwd, COMMAND_TIMEOUT_MS, logCommand); }
 
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
@@ -408,8 +287,6 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
     case 'python_job_kill': return killPythonJob(args);
     case 'python_jobs': return listPythonJobs();
     case 'run_node': return command('node', args, logCommand);
-    case 'read_file_range': return readFileRange(args);
-    case 'tail_file': return tailFile(args);
     case 'get_file_info': return fileInfo(args);
     case 'create_directory': return createDirectory(args);
     case 'copy_file': return copyFile(args);
@@ -417,8 +294,6 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
     case 'kill_process': return killProcess(args, logCommand);
     case 'rg': return rg(args, logCommand);
     case 'git': return git(args, logCommand);
-    case 'apply_patch': return applyPatch(args, logCommand);
-    case 'edit_file': return editFile(args);
     case 'find_files': return findFiles(args, logCommand);
     case 'cdp_version': return cdpVersion();
     case 'cdp_list_targets': return cdpListTargets();
