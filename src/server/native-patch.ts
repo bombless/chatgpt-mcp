@@ -8,6 +8,7 @@ type PatchOperation =
 function normalizePatchPath(value: string): string {
   const raw = value.trim().replace(/^a\//, '').replace(/^b\//, '');
   if (!raw || raw === '/dev/null') throw new Error(`Invalid patch path: ${value}`);
+  if (raw.startsWith('/') || /^[A-Za-z]:[\\/]/.test(raw)) throw new Error(`Patch path must be relative: ${value}`);
   const normalized = path.posix.normalize(raw.replaceAll('\\', '/'));
   if (normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) throw new Error(`Patch path escapes workspace: ${value}`);
   return normalized;
