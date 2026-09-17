@@ -9,12 +9,12 @@ test('aggregates success and failure counts per session', () => {
   tracker.recordSuccess('session-a', 'read_file');
   tracker.recordStart('session-a', 'read_file');
   tracker.recordSuccess('session-a', 'read_file');
-  tracker.recordStart('session-a', 'run_npm');
-  tracker.recordFailure('session-a', 'run_npm');
+  tracker.recordStart('session-a', 'npm_test');
+  tracker.recordFailure('session-a', 'npm_test');
 
   assert.deepEqual(tracker.get('session-a').tools, [
     { name: 'read_file', count: 2, success: 2, failed: 0 },
-    { name: 'run_npm', count: 1, success: 0, failed: 1 },
+    { name: 'npm_test', count: 1, success: 0, failed: 1 },
   ]);
 });
 
