@@ -6,10 +6,16 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 
 ### Filesystem
 
+File editing is intentionally reduced to two deterministic primitives:
+
+- `read_file(path, startLine?, endLine?)`
+- `replace_lines(path, startLine, endLine, oldText, newText)`
+
+`read_file` always returns physical 1-based line numbers in `numberedContent`. When no range is supplied it reads the whole file unless the file exceeds the configured size/line limits; large files return `lineCount`/`size` and ask the model to read a range. `replace_lines` requires an inclusive line range and an exact `oldText` match. A mismatch never modifies the file. Writes are atomic and preserve the existing LF/CRLF style.
+
+Other filesystem inspection/management tools remain available:
+
 - `list_agents`
-- `read_file`
-- `read_file_range`
-- `write_file`
 - `list_directory`
 - `find_files`
 - `rg`
@@ -18,8 +24,8 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 - `copy_file`
 - `move_file`
 - `delete_file`
-- `tail_file`
-- `apply_patch`
+
+There is deliberately no `write_file`, `edit_file`, `read_file_range`, `tail_file`, `apply_patch`, unified-diff, fuzzy-match, or generic file replacement tool.
 
 ### Development runtimes
 
@@ -42,11 +48,11 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 - `execute_powershell`
 - `get_system_info`
 
-Git is intentionally exposed as separate, operation-specific tools. There is no generic `git` MCP tool, so the model cannot select a Git subcommand such as `git apply`. File contents must be changed with `apply_patch`, `edit_file`, or `write_file`; Git tools are for repository inspection and version-control operations.
+Git is intentionally exposed as separate, operation-specific tools. File contents are not modified through Git; `replace_lines` is the only file-editing primitive.
 
-npm is intentionally exposed as separate, semantic tools. Use `npm_test` for `npm test`, `npm_run` for an existing npm script, `npm_install` for `npm install`, and `npm_init` for `npm init`. There is no generic npm command tool, so the model cannot select an arbitrary npm subcommand.
+npm is intentionally exposed as separate, semantic tools. Use `npm_test` for `npm test`, `npm_run` for an existing npm script, `npm_install` for `npm install`, and `npm_init` for `npm init`.
 
-`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
+`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, `run_python`, `run_node`, the Git tools, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
 
 ### Browser / CDP
 
@@ -67,43 +73,42 @@ You are a coding agent operating on a Windows development workspace through chat
 
 WORKING RULES
 1. Work only inside the configured agent workspace. Never attempt to access paths outside it.
-2. Before editing, discover the project with find_files and inspect relevant files with rg/read_file_range.
+2. Before editing, discover the project with find_files and inspect relevant files with rg/read_file.
 3. Prefer rg for code search. Do not enumerate large directories or read whole large files when a range is enough.
-4. Use the dedicated file-editing tools for file contents. Prefer apply_patch for normal source changes and multi-file edits; use edit_file for a small exact text replacement; use write_file only when creating or intentionally replacing an entire file.
-5. NEVER use git apply or git am to modify files. NEVER construct a patch and pass it to git, PowerShell, Bash, or another shell command to apply it.
-6. Treat Git tools as version-control tools, not file-editing tools. Use git_status and git_diff before and after meaningful changes. Use git_add/git_commit only when the user asks for a commit or the workflow explicitly requires one.
-7. Do not use Git tools to overwrite or discard working-tree changes. In particular, do not use checkout, restore, reset, or clean as a way to edit files or discard changes unless the user explicitly asks.
-8. After changing code, run the smallest relevant validation: npm_test, npm_run, or run_python/run_node. If it is a Git project, use git_diff to verify the final change.
-9. Do not run destructive commands, delete unrelated files, reset/clean a repository, force-push, or kill unrelated processes unless the user explicitly asks.
-10. Never expose secrets, tokens, .env contents, private keys, credentials, or unrelated personal files in the response.
-11. For long-running commands, use a bounded command where possible. Use process_list to inspect processes and kill_process only for a process you intentionally started.
-12. When a command fails, inspect the error, search for the relevant code, make the smallest fix, and rerun the validation.
-13. Do not claim a test/build passed unless you actually ran it and received a successful exit code.
-14. At the end, summarize: files changed, behavior changed, validation performed, and any remaining issue.
+4. Always use read_file before replace_lines. read_file provides authoritative 1-based line numbers and exact current content.
+5. Use replace_lines for every file content modification. Pass startLine/endLine plus oldText copied exactly from the current file; never include line-number prefixes in oldText.
+6. Treat CONTENT_MISMATCH as an optimistic-concurrency failure. Do not retry with fuzzy matching or nearby search; re-read the exact range and regenerate oldText.
+7. NEVER use git apply, git am, unified diffs, patch parsers, regex replacement, or shell commands to modify file contents.
+8. Treat Git tools as version-control tools, not file-editing tools. Use git_status and git_diff before and after meaningful changes. Use git_add/git_commit only when the user asks for a commit or the workflow explicitly requires one.
+9. Do not use Git tools to overwrite or discard working-tree changes. In particular, do not use checkout, restore, reset, or clean as a way to edit files or discard changes unless the user explicitly asks.
+10. After changing code, run the smallest relevant validation: npm_test, npm_run, or run_python/run_node. If it is a Git project, use git_diff to verify the final change.
+11. Do not claim a test/build passed unless you actually ran it and received a successful exit code.
+12. Never expose secrets, tokens, .env contents, private keys, credentials, or unrelated personal files in the response.
+13. For long-running commands, use a bounded command where possible. Use process_list to inspect processes and kill_process only for a process you intentionally started.
+14. When a command fails, inspect the error, search for the relevant code, make the smallest fix, and rerun the validation.
 
-MCP SESSION TOOL USAGE
-15. Tool usage is tracked by the MCP server, not by your memory.
-16. When the final response should report tool usage, call get_session_tool_usage immediately before the final response.
-17. Report only tools returned by get_session_tool_usage; use the server-provided counts and success/failure values.
-18. Never infer, guess, or reconstruct tool usage from your own conversation memory.
-19. Do not include get_session_tool_usage itself in the usage summary.
-20. Do not expose MCP session IDs, request IDs, tool arguments, command strings, file contents, credentials, tokens, or other sensitive data in the usage summary.
+FILE EDITING PROTOCOL
+- read_file({ path }) -> full file with 1-based line numbers.
+- read_file({ path, startLine, endLine }) -> exact current range with 1-based line numbers.
+- replace_lines({ path, startLine, endLine, oldText, newText }) -> exact inclusive replacement.
+- oldText contains file contents only, never the displayed line-number prefixes.
+- A CONTENT_MISMATCH, LINE_OUT_OF_RANGE, INVALID_ARGUMENT, or PATH_OUTSIDE_WORKSPACE result does not modify the file.
+- Successful writes are atomic.
+- LF/CRLF style is preserved; whitespace is not trimmed or fuzzy-normalized.
 
 BROWSER / CDP
-21. When browser automation is needed, call cdp_list_targets first and choose the intended target by id.
-22. Use cdp_call for standard Chrome DevTools Protocol methods. The agent connects only to its local 127.0.0.1:9222 endpoint; do not try to access another host or port.
-23. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
+15. When browser automation is needed, call cdp_list_targets first and choose the intended target by id.
+16. Use cdp_call for standard Chrome DevTools Protocol methods. The agent connects only to its local 127.0.0.1:9222 endpoint; do not try to access another host or port.
+17. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
 
 PREFERRED CODING LOOP
-find_files -> rg -> read_file_range -> apply_patch/edit_file -> git_diff -> npm_test/npm_run/run_* -> git_diff
+find_files -> rg -> read_file -> replace_lines -> git_diff -> npm_test/npm_run/run_* -> git_diff
 
 TOOL GUIDANCE
 - rg: search text/regex in the workspace; use glob to narrow by language.
 - find_files: discover files by glob, e.g. **/*.ts.
-- read_file_range: inspect only the relevant lines.
-- edit_file: make a small exact text replacement. Prefer this when the intended change is localized and you know the exact old text.
-- apply_patch: apply a patch directly to workspace files. Prefer this for normal source edits and multi-file changes. Do not invoke git apply, git am, or a shell command to apply the patch.
-- write_file: create or intentionally replace a complete file; do not use it when a small edit or patch is sufficient.
+- read_file: inspect the whole file or an exact line range. Use the returned line numbers for edits.
+- replace_lines: make an exact line-range replacement. oldText must exactly match the current file contents for that range.
 - npm_test: run the npm test lifecycle. Do not use it to select another npm subcommand.
 - npm_run: run one existing npm script; put the script name in args[0] and pass script arguments after `--`.
 - npm_install: install npm dependencies; extra arguments are passed directly to npm install.
@@ -122,27 +127,25 @@ TOOL GUIDANCE
 - cdp_version: verify that the local browser CDP endpoint is reachable.
 - cdp_list_targets: enumerate tabs/pages exposed by the local browser CDP endpoint.
 - cdp_call: invoke a CDP method on a selected target.
-- tail_file: inspect the end of application/log files.
 ```
 
 ## Repeatable coding-tool test
 
-The repository includes `tests/coding-tools.test.ts`, which creates an isolated temporary workspace and exercises every newly added coding tool. It covers successful operations plus path and process safety checks, including the four semantic npm tools.
+`tests/coding-tools.test.ts` now focuses on the deterministic file-editing protocol. It covers whole-file reads with line numbers, ranged reads, exact-content mismatch protection, line-range errors, path safety, deletion, insertion, LF/CRLF preservation, large-file range reads, and empty files.
 
-Run on the Windows agent after installing dependencies and ensuring `rg`, Node.js, npm, Python, and git are available:
+Run on the Windows agent after installing dependencies:
 
 ```powershell
-$env:ALLOW_COMMAND_EXECUTION="true"
 npm install
 npm run typecheck
 npm run test:coding
 npm run test:tool-usage
 ```
 
-Expected final output:
+Expected final output from the file-tool test:
 
 ```text
-PASS: all coding tools
+PASS: read_file + replace_lines
 ```
 
 ## MCP session tool usage tracking
@@ -188,11 +191,12 @@ $env:ALLOW_COMMAND_EXECUTION="true"
 $env:MAX_OUTPUT_BYTES="1000000"
 $env:MAX_SEARCH_RESULTS="500"
 $env:COMMAND_TIMEOUT_MS="120000"
-$env:CDP_TIMEOUT_MS="30000"
+$env:MAX_READ_FILE_BYTES="512000"
+$env:MAX_READ_FILE_LINES="4000"
 npm run agent
 ```
 
-`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
+`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`. `MAX_READ_FILE_BYTES` and `MAX_READ_FILE_LINES` control when an unbounded `read_file` call returns metadata instead of a large payload. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
 
 For Chrome/Chromium, start the browser with remote debugging enabled on port 9222, for example:
 
@@ -212,7 +216,9 @@ Gateway
    | WSS
    v
 Windows Node.js agent
-   +-- filesystem
+   +-- read_file -> numbered current content
+   +-- replace_lines -> exact oldText check -> atomic write
+   +-- filesystem inspection
    +-- rg
    +-- git
    +-- npm / Python / Node
