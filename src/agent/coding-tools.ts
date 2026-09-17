@@ -259,8 +259,20 @@ async function command(name: 'npm' | 'python' | 'node', args: Record<string, unk
   requireCommandExecution();
   const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
   const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
-  const executable = process.platform === 'win32' && name === 'npm' ? 'npm.cmd' : name;
-  try { return await exec(executable, commandArgs, cwd, COMMAND_TIMEOUT_MS, logCommand); }
+
+  // npm is a .cmd wrapper on Windows. Node's execFile/spawn cannot execute
+  // .cmd files directly with shell:false and reports `spawn EINVAL` on
+  // current Node releases. Do not switch to shell:true here: npm arguments
+  // are model/user input and must not become shell syntax. Launch npm's JS
+  // entry point directly with the current Node executable instead.
+  const executable = process.platform === 'win32' && name === 'npm'
+    ? process.execPath
+    : name;
+  const executableArgs = process.platform === 'win32' && name === 'npm'
+    ? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...commandArgs]
+    : commandArgs;
+
+  try { return await exec(executable, executableArgs, cwd, COMMAND_TIMEOUT_MS, logCommand); }
   catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
 }
 
