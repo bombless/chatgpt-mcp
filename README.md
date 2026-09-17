@@ -26,11 +26,20 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 - `run_npm`
 - `run_python`
 - `run_node`
-- `git`
+- `git_status`
+- `git_diff`
+- `git_log`
+- `git_show`
+- `git_blame`
+- `git_branch`
+- `git_add`
+- `git_commit`
 - `process_list`
 - `kill_process`
 - `execute_powershell`
 - `get_system_info`
+
+Git is intentionally exposed as separate, operation-specific tools. There is no generic `git` MCP tool, so the model cannot select a Git subcommand such as `git apply`. File contents must be changed with `apply_patch`, `edit_file`, or `write_file`; Git tools are for repository inspection and version-control operations.
 
 ### Browser / CDP
 
@@ -40,7 +49,7 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 
 The CDP tools run inside the Windows agent and connect **only** to `http://127.0.0.1:9222`, so ChatGPT can reach a browser's local Chrome DevTools Protocol endpoint without exposing port 9222 to the network. `cdp_list_targets` returns the available browser targets; pass a target's `id` to `cdp_call` and use the normal CDP method name and parameters, for example `Runtime.evaluate` or `Page.navigate`.
 
-`rg`, `find_files`, and filesystem inspection do not require command execution. `run_npm`, `run_python`, `run_node`, `git`, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
+`rg`, `find_files`, and filesystem inspection do not require command execution. `run_npm`, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
 
 All paths are restricted to `AGENT_WORKSPACE`. Keep the agent running as a normal user, not Administrator.
 
@@ -57,9 +66,9 @@ WORKING RULES
 3. Prefer rg for code search. Do not enumerate large directories or read whole large files when a range is enough.
 4. Use the dedicated file-editing tools for file contents. Prefer apply_patch for normal source changes and multi-file edits; use edit_file for a small exact text replacement; use write_file only when creating or intentionally replacing an entire file.
 5. NEVER use git apply or git am to modify files. NEVER construct a patch and pass it to git, PowerShell, Bash, or another shell command to apply it.
-6. Treat git as a version-control tool, not a file-editing tool. Use git status and git diff before and after meaningful changes. Use git diff to inspect and verify edits; use git add/commit only when the user asks for a commit or the workflow explicitly requires one.
-7. Do not use git checkout, git restore, git reset, or git clean to overwrite or discard working-tree changes unless the user explicitly asks.
-8. After changing code, run the smallest relevant validation: run_npm, run_node, or run_python. If it is a Git project, use git diff to verify the final change.
+6. Treat Git tools as version-control tools, not file-editing tools. Use git_status and git_diff before and after meaningful changes. Use git_diff to inspect and verify edits; use git_add/git_commit only when the user asks for a commit or the workflow explicitly requires one.
+7. Do not use Git tools to overwrite or discard working-tree changes. In particular, do not use checkout, restore, reset, or clean as a way to edit files or discard changes unless the user explicitly asks.
+8. After changing code, run the smallest relevant validation: run_npm, run_node, or run_python. If it is a Git project, use git_diff to verify the final change.
 9. Do not run destructive commands, delete unrelated files, reset/clean a repository, force-push, or kill unrelated processes unless the user explicitly asks.
 10. Never expose secrets, tokens, .env contents, private keys, credentials, or unrelated personal files in the response.
 11. For long-running commands, use a bounded command where possible. Use process_list to inspect processes and kill_process only for a process you intentionally started.
@@ -69,10 +78,10 @@ WORKING RULES
 
 MCP SESSION TOOL USAGE
 15. Tool usage is tracked by the MCP server, not by your memory.
-16. When the final response should report tool usage, call `get_session_tool_usage` immediately before the final response.
-17. Report only tools returned by `get_session_tool_usage`; use the server-provided counts and success/failure values.
+16. When the final response should report tool usage, call get_session_tool_usage immediately before the final response.
+17. Report only tools returned by get_session_tool_usage; use the server-provided counts and success/failure values.
 18. Never infer, guess, or reconstruct tool usage from your own conversation memory.
-19. Do not include `get_session_tool_usage` itself in the usage summary.
+19. Do not include get_session_tool_usage itself in the usage summary.
 20. Do not expose MCP session IDs, request IDs, tool arguments, command strings, file contents, credentials, tokens, or other sensitive data in the usage summary.
 
 BROWSER / CDP
@@ -81,7 +90,7 @@ BROWSER / CDP
 23. Prefer Runtime.evaluate for small page-level inspections/interactions when a DOM automation library is not otherwise available.
 
 PREFERRED CODING LOOP
-find_files -> rg -> read_file_range -> apply_patch/edit_file -> git diff -> run_* -> git diff
+find_files -> rg -> read_file_range -> apply_patch/edit_file -> git_diff -> run_* -> git_diff
 
 TOOL GUIDANCE
 - rg: search text/regex in the workspace; use glob to narrow by language.
@@ -93,7 +102,14 @@ TOOL GUIDANCE
 - run_npm: use for npm commands such as test, build, lint, install when appropriate.
 - run_node: use for Node scripts or quick runtime checks.
 - run_python: use for Python scripts/tests.
-- git: use for repository state, diff, history, staging, and commits. Never use `git apply` as a file-editing mechanism.
+- git_status: inspect working-tree and staging state.
+- git_diff: inspect and verify working-tree or staged changes.
+- git_log: inspect commit history.
+- git_show: inspect a commit or Git object.
+- git_blame: inspect line-level file history.
+- git_branch: inspect or manage branches; do not use it to discard working-tree changes.
+- git_add: stage explicitly selected files when the workflow requires staging.
+- git_commit: create a commit when the user asks for one or the workflow explicitly requires one.
 - process_list / kill_process: manage processes started for development/testing.
 - cdp_version: verify that the local browser CDP endpoint is reachable.
 - cdp_list_targets: enumerate tabs/pages exposed by the local browser CDP endpoint.
