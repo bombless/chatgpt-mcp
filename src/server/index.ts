@@ -80,9 +80,9 @@ function buildMcpServer() {
   const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodType>, outputSchema: z.ZodType) =>
     server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) =>
       resultContent(await registry.call(String(args.agentId), name, args)));
-  const npmTool = (name: string, description: string, argsBuilder: (args: Record<string, unknown>) => string[]) =>
+  const npmTool = (name: Extract<ToolName, 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init'>, description: string, argsBuilder: (args: Record<string, unknown>) => string[]) =>
     server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
-      resultContent(await registry.call(agentId, 'run_npm', { args: argsBuilder({ args }), cwd, intent })));
+      resultContent(await registry.call(agentId, name, { args: argsBuilder({ args }), cwd, intent })));
   const gitTool = (name: string, subcommand: string, description: string) =>
     server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
       resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
