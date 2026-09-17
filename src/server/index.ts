@@ -80,6 +80,9 @@ function buildMcpServer() {
   const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodType>, outputSchema: z.ZodType) =>
     server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) =>
       resultContent(await registry.call(String(args.agentId), name, args)));
+  const npmTool = (name: string, description: string, argsBuilder: (args: Record<string, unknown>) => string[]) =>
+    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
+      resultContent(await registry.call(agentId, 'run_npm', { args: argsBuilder({ args }), cwd, intent })));
   const gitTool = (name: string, subcommand: string, description: string) =>
     server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
       resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
@@ -108,10 +111,10 @@ function buildMcpServer() {
 
   server.registerTool('fetch_image_url', { description: 'Return the supplied image URL unchanged. Useful for testing whether ChatGPT can display an image from a URL.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ url: z.string().url() }) }) }, async ({ url }) => resultContent({ url }));
 
-  codingTool('npm_test', 'Run `npm test` in the workspace. This tool only runs the npm test lifecycle; do not pass another npm subcommand.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
-  codingTool('npm_run', 'Run a named npm script with `npm run <script>`. The script name is explicit; extra arguments are passed to that script after `--`.', { agentId: agentIdSchema, script: z.string().min(1), args: z.array(z.string()).default([]), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
-  codingTool('npm_install', 'Install npm dependencies with `npm install`. Extra arguments are passed directly to npm install.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
-  codingTool('npm_init', 'Initialize a package with `npm init`. Extra arguments are passed directly to npm init.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
+  npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
+  npmTool('npm_run', 'Run one named npm script with `npm run <script>`. Extra arguments are passed to that script after `--`.', ({ args }) => { const values = Array.isArray(args) ? args.map(String) : []; const script = values.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); return ['run', script, ...(values.length ? ['--', ...values] : [])]; });
+  npmTool('npm_install', 'Install npm dependencies with `npm install`. Extra arguments are passed directly to npm install.', ({ args }) => ['install', ...(Array.isArray(args) ? args.map(String) : [])]);
+  npmTool('npm_init', 'Initialize a package with `npm init`. Extra arguments are passed directly to npm init.', ({ args }) => ['init', ...(Array.isArray(args) ? args.map(String) : [])]);
   codingTool('run_python', 'Run Python with arguments in the workspace. By default waits for completion with COMMAND_TIMEOUT_MS; set async=true to start a background Python job and receive a jobId. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema, async: z.boolean().default(false) }, z.object({ result: z.union([commandResultSchema, z.object({ jobId: z.string(), pid: z.number().int(), status: z.literal('running'), command: z.string(), cwd: z.string(), startedAt: z.string() })]) }));
   codingTool('python_job_inspect', 'Inspect a background Python job by jobId, including status and captured stdout/stderr.', { agentId: agentIdSchema, jobId: z.string().min(1) }, z.object({ result: pythonJobSchema }));
   codingTool('python_job_kill', 'Terminate a background Python job by jobId and its process tree. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, jobId: z.string().min(1) }, z.object({ result: pythonJobSchema }));
@@ -133,11 +136,14 @@ function buildMcpServer() {
   gitTool('git_branch', 'Inspect or manage Git branches. This tool runs only `git branch`; it cannot run other Git subcommands.', 'Inspect or manage branches with `git branch`. Do not use it to discard working-tree changes.');
   gitTool('git_add', 'Stage files for a Git commit. This tool runs only `git add`; it cannot run other Git subcommands.', 'Stage explicitly selected files with `git add`.');
   gitTool('git_commit', 'Create a Git commit. This tool runs only `git commit`; it cannot run other Git subcommands.', 'Create a Git commit with `git commit`.');
-  server.registerTool('apply_patch', { description: 'Apply a Codex-style patch directly through workspace file operations. This implementation never invokes git apply, git am, PowerShell, Bash, or another shell command. Supports *** Begin Patch with Add File, Update File, and Delete File operations. Requires ALLOW_COMMAND_EXECUTION=true because the patch is executed through the connected agent.', inputSchema: input({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema }), outputSchema: z.object({ result: z.unknown() }) }, async ({ agentId, patch, intent }) => resultContent(await applyNativePatch(patch, {
-    editFile: async (path, oldText, newText) => registry.call(agentId, 'edit_file', { path, oldText, newText, expectedReplacements: 1, intent }),
-    writeFile: async (path, content) => registry.call(agentId, 'write_file', { path, content, intent }),
-    deleteFile: async (path) => registry.call(agentId, 'delete_file', { path, intent }),
-  })));
+  server.registerTool('apply_patch', { description: 'Apply a Codex-style patch directly through workspace file operations. This implementation never invokes git apply, git am, PowerShell, Bash, or another shell command. Supports *** Begin Patch with Add File, Update File, and Delete File operations.', inputSchema: input({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema }), outputSchema: z.object({ result: z.unknown() }) }, async ({ agentId, patch, cwd, intent }) => {
+    const patchPath = (value: string) => cwd ? `${cwd.replace(/[\\/]+$/, '')}\\${value.replaceAll('/', '\\')}` : value;
+    return resultContent(await applyNativePatch(patch, {
+      editFile: async (path, oldText, newText) => registry.call(agentId, 'edit_file', { path: patchPath(path), oldText, newText, expectedReplacements: 1, intent }),
+      writeFile: async (path, content) => registry.call(agentId, 'write_file', { path: patchPath(path), content, intent }),
+      deleteFile: async (path) => registry.call(agentId, 'delete_file', { path: patchPath(path), intent }),
+    }));
+  });
   codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ files: z.array(z.string()), truncated: z.boolean(), count: z.number().int() }) }));
   codingTool('cdp_version', 'Get the Chrome DevTools Protocol version from the Windows agent local browser at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.record(z.string(), z.unknown()) }));
   codingTool('cdp_list_targets', 'List browser tabs/targets exposed by the Windows agent local CDP endpoint at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.array(z.object({ id: z.string(), type: z.string().optional(), title: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional() })) }));
