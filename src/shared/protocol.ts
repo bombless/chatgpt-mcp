@@ -25,8 +25,7 @@ export type AgentMessage = AgentHello | AgentResponse;
 
 export type ToolName =
   | 'read_file'
-  | 'write_file'
-  | 'edit_file'
+  | 'replace_lines'
   | 'list_directory'
   | 'move_file'
   | 'delete_file'
@@ -42,8 +41,6 @@ export type ToolName =
   | 'python_job_kill'
   | 'python_jobs'
   | 'run_node'
-  | 'read_file_range'
-  | 'tail_file'
   | 'get_file_info'
   | 'create_directory'
   | 'copy_file'
@@ -51,7 +48,6 @@ export type ToolName =
   | 'kill_process'
   | 'rg'
   | 'git'
-  | 'apply_patch'
   | 'find_files'
   | 'cdp_version'
   | 'cdp_list_targets'
