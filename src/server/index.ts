@@ -10,7 +10,6 @@ import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../sha
 import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
-import { applyNativePatch } from './native-patch.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
@@ -46,10 +45,7 @@ const registry = new AgentRegistry();
 function resultContent(value: unknown) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   console.log('[mcp] agent result returned to model:', text);
-  return {
-    content: [{ type: 'text' as const, text }],
-    structuredContent: { result: value },
-  };
+  return { content: [{ type: 'text' as const, text }], structuredContent: { result: value } };
 }
 function bearer(req: express.Request) { const value = req.header('authorization'); return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
 async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
@@ -64,10 +60,7 @@ async function fetchImage(url: string) {
   if (bytes.length === 0) throw new Error('Image response was empty');
   return { bytes, mimeType: contentType };
 }
-
-function normalizeImageMimeType(mimeType: string) {
-  return mimeType.toLowerCase().split(';', 1)[0]?.trim() || 'image/png';
-}
+function normalizeImageMimeType(mimeType: string) { return mimeType.toLowerCase().split(';', 1)[0]?.trim() || 'image/png'; }
 
 function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
@@ -78,19 +71,23 @@ function buildMcpServer() {
   const pythonJobSchema = z.object({ jobId: z.string(), pid: z.number().int(), status: z.enum(['running', 'exited', 'failed', 'killed']), command: z.string(), cwd: z.string(), args: z.array(z.string()), startedAt: z.string(), finishedAt: z.string().nullable(), exitCode: z.number().int().nullable(), signal: z.string().nullable(), stdout: z.string(), stderr: z.string(), stdoutTruncated: z.boolean(), stderrTruncated: z.boolean() });
   const input = <const T extends Record<string, z.ZodType>>(shape: T) => z.object({ ...shape, intent: intentSchema });
   const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodType>, outputSchema: z.ZodType) =>
-    server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) =>
-      resultContent(await registry.call(String(args.agentId), name, args)));
+    server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) => resultContent(await registry.call(String(args.agentId), name, args)));
   const npmTool = (name: Extract<ToolName, 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init'>, description: string, argsBuilder: (args: Record<string, unknown>) => string[]) =>
-    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
-      resultContent(await registry.call(agentId, name, { args: argsBuilder({ args }), cwd, intent })));
+    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) => resultContent(await registry.call(agentId, name, { args: argsBuilder({ args }), cwd, intent })));
   const gitTool = (name: string, subcommand: string, description: string) =>
-    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
-      resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
+    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) => resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
 
   server.registerTool('list_agents', { description: 'List connected Windows computers.', inputSchema: z.object({ intent: intentSchema }), outputSchema: z.object({ result: z.array(z.string()) }) }, async () => resultContent(registry.list()));
-  server.registerTool('read_file', { description: 'Read a UTF-8 text file on Windows.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.string() }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'read_file', { path, intent })));
-  server.registerTool('write_file', { description: 'Write UTF-8 text to a Windows file. Parent directories must already exist.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), content: z.string() }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string() }) }) }, async ({ agentId, path, content, intent }) => resultContent(await registry.call(agentId, 'write_file', { path, content, intent })));
-  server.registerTool('edit_file', { description: 'Replace exact text in a UTF-8 file. Fails unless oldText occurs exactly expectedReplacements times (default 1). Optionally verifies expectedSha256 before editing and returns a diff plus before/after hashes.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), oldText: z.string().min(1), newText: z.string(), expectedReplacements: z.number().int().min(1).default(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional() }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), changed: z.literal(true), replacements: z.number().int(), bytesBefore: z.number().int(), bytesAfter: z.number().int(), sha256Before: z.string(), sha256After: z.string(), diff: z.string() }) }) }, async ({ agentId, path, oldText, newText, expectedReplacements, expectedSha256, intent }) => resultContent(await registry.call(agentId, 'edit_file', { path, oldText, newText, expectedReplacements, expectedSha256, intent })));
+  server.registerTool('read_file', {
+    description: 'Read a file from the workspace. The result always contains 1-based physical line numbers in numberedContent. Omit startLine/endLine to read the whole file; large files return lineCount/size and ask for a range.',
+    inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), startLine: z.number().int().min(1).optional(), endLine: z.number().int().min(1).optional() }),
+    outputSchema: z.object({ result: z.unknown() }),
+  }, async ({ agentId, path, startLine, endLine, intent }) => resultContent(await registry.call(agentId, 'read_file', { path, startLine, endLine, intent })));
+  server.registerTool('replace_lines', {
+    description: 'Replace an exact inclusive line range. startLine/endLine are 1-based. oldText must exactly match the current contents of those lines; on mismatch, out-of-range, invalid arguments, or path escape, no file modification is performed. Uses an atomic write and preserves the existing file newline style.',
+    inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), startLine: z.number().int().min(1), endLine: z.number().int().min(1), oldText: z.string(), newText: z.string() }),
+    outputSchema: z.object({ result: z.unknown() }),
+  }, async ({ agentId, path, startLine, endLine, oldText, newText, intent }) => resultContent(await registry.call(agentId, 'replace_lines', { path, startLine, endLine, oldText, newText, intent })));
   server.registerTool('list_directory', { description: 'List a Windows directory.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.array(z.object({ name: z.string(), type: z.enum(['directory', 'file']) })) }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'list_directory', { path, intent })));
   server.registerTool('move_file', { description: 'Move or rename a Windows file or directory.', inputSchema: input({ agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), source: z.string(), destination: z.string() }) }) }, async ({ agentId, source, destination, intent }) => resultContent(await registry.call(agentId, 'move_file', { source, destination, intent })));
   server.registerTool('delete_file', { description: 'Delete a Windows file or empty directory.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string() }) }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'delete_file', { path, intent })));
@@ -103,12 +100,7 @@ function buildMcpServer() {
     const content = [{ type: 'image' as const, data: bytes.toString('base64'), mimeType: normalizeImageMimeType(mimeType) }];
     return { content, structuredContent: { result: content } };
   });
-
-  server.registerTool('fetch_image_base64', { description: 'Fetch an image URL and return its Base64-encoded bytes as text.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ mimeType: z.string(), base64: z.string() }) }) }, async ({ url }) => {
-    const { bytes, mimeType } = await fetchImage(url);
-    return resultContent({ mimeType: normalizeImageMimeType(mimeType), base64: bytes.toString('base64') });
-  });
-
+  server.registerTool('fetch_image_base64', { description: 'Fetch an image URL and return its Base64-encoded bytes as text.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ mimeType: z.string(), base64: z.string() }) }) }, async ({ url }) => { const { bytes, mimeType } = await fetchImage(url); return resultContent({ mimeType: normalizeImageMimeType(mimeType), base64: bytes.toString('base64') }); });
   server.registerTool('fetch_image_url', { description: 'Return the supplied image URL unchanged. Useful for testing whether ChatGPT can display an image from a URL.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ url: z.string().url() }) }) }, async ({ url }) => resultContent({ url }));
 
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
@@ -120,8 +112,6 @@ function buildMcpServer() {
   codingTool('python_job_kill', 'Terminate a background Python job by jobId and its process tree. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, jobId: z.string().min(1) }, z.object({ result: pythonJobSchema }));
   codingTool('python_jobs', 'List background Python jobs known by this Windows agent.', { agentId: agentIdSchema }, z.object({ result: z.array(pythonJobSchema) }));
   codingTool('run_node', 'Run Node.js with arguments in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }, z.object({ result: commandResultSchema }));
-  codingTool('read_file_range', 'Read only a 1-based inclusive line range from a UTF-8 file.', { agentId: agentIdSchema, path: z.string().min(1), startLine: z.number().int().min(1), endLine: z.number().int().min(1) }, z.object({ result: z.string() }));
-  codingTool('tail_file', 'Read the last N lines of a UTF-8 text file.', { agentId: agentIdSchema, path: z.string().min(1), lines: z.number().int().min(1).max(10000).default(100) }, z.object({ result: z.string() }));
   codingTool('get_file_info', 'Get file type, size, modification time and mode.', { agentId: agentIdSchema, path: z.string().min(1) }, z.object({ result: z.object({ path: z.string(), type: z.enum(['directory', 'file', 'other']), size: z.number(), mtime: z.string(), mode: z.number() }) }));
   codingTool('create_directory', 'Create a directory recursively inside the workspace.', { agentId: agentIdSchema, path: z.string().min(1) }, z.object({ result: z.object({ ok: z.literal(true), path: z.string() }) }));
   codingTool('copy_file', 'Copy a file inside the workspace.', { agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1) }, z.object({ result: z.object({ ok: z.literal(true), source: z.string(), destination: z.string() }) }));
@@ -136,14 +126,6 @@ function buildMcpServer() {
   gitTool('git_branch', 'branch', 'Inspect or manage branches with `git branch`. Do not use it to discard working-tree changes.');
   gitTool('git_add', 'add', 'Stage explicitly selected files with `git add`.');
   gitTool('git_commit', 'commit', 'Create a Git commit with `git commit`.');
-  server.registerTool('apply_patch', { description: 'Apply a Codex-style patch directly through workspace file operations. This implementation never invokes git apply, git am, PowerShell, Bash, or another shell command. Supports *** Begin Patch with Add File, Update File, and Delete File operations.', inputSchema: input({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema }), outputSchema: z.object({ result: z.unknown() }) }, async ({ agentId, patch, cwd, intent }) => {
-    const patchPath = (value: string) => cwd ? `${cwd.replace(/[\\/]+$/, '')}\\${value.replaceAll('/', '\\')}` : value;
-    return resultContent(await applyNativePatch(patch, {
-      editFile: async (path, oldText, newText) => registry.call(agentId, 'edit_file', { path: patchPath(path), oldText, newText, expectedReplacements: 1, intent }),
-      writeFile: async (path, content) => registry.call(agentId, 'write_file', { path: patchPath(path), content, intent }),
-      deleteFile: async (path) => registry.call(agentId, 'delete_file', { path: patchPath(path), intent }),
-    }));
-  });
   codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ files: z.array(z.string()), truncated: z.boolean(), count: z.number().int() }) }));
   codingTool('cdp_version', 'Get the Chrome DevTools Protocol version from the Windows agent local browser at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.record(z.string(), z.unknown()) }));
   codingTool('cdp_list_targets', 'List browser tabs/targets exposed by the Windows agent local CDP endpoint at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.array(z.object({ id: z.string(), type: z.string().optional(), title: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional() })) }));
@@ -165,13 +147,7 @@ app.post('/oauth/authorize/approve', async (req, res) => { const result = await 
 app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
 app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req); res.json({ agents: registry.list() }); });
 
-const toBuffer = (chunk: unknown) => {
-  if (Buffer.isBuffer(chunk)) return chunk;
-  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
-  if (chunk instanceof ArrayBuffer) return Buffer.from(chunk);
-  return Buffer.from(String(chunk));
-};
-
+const toBuffer = (chunk: unknown) => { if (Buffer.isBuffer(chunk)) return chunk; if (chunk instanceof Uint8Array) return Buffer.from(chunk); if (chunk instanceof ArrayBuffer) return Buffer.from(chunk); return Buffer.from(String(chunk)); };
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
 app.all('/mcp', async (req, res) => {
   if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
@@ -186,7 +162,7 @@ const httpServer = createHttpServer(app);
 const wss = new WebSocketServer({ noServer: true });
 httpServer.on('upgrade', (req, socket, head) => {
   if (req.url !== '/agent') return socket.destroy();
-  if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+  if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n'); socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
 wss.on('connection', ws => {
