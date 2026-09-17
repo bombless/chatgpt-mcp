@@ -157,3 +157,62 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use((req, res, next) => { const id = requestId(req); res.setHeader('X-Request-Id', id); if (MCP_DEBUG) mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) }); res.on('finish', () => { if (MCP_DEBUG) mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode }); }); next(); });
 app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
+app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
+app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
+app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
+app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
+app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
+app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
+app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req); res.json({ agents: registry.list() }); });
+
+const toBuffer = (chunk: unknown) => {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  if (chunk instanceof ArrayBuffer) return Buffer.from(chunk);
+  return Buffer.from(String(chunk));
+};
+
+const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
+app.all('/mcp', async (req, res) => {
+  if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
+  mcpDebug('handler:dispatch', { method: req.method, contentType: req.get('content-type'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined });
+  try {
+    const result = mcpHandler(req, res, req.body);
+    if (result && typeof (result as Promise<unknown>).then === 'function') void (result as Promise<unknown>).then(() => mcpDebug('handler:complete', { method: req.method })).catch(error => mcpDebug('handler:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }));
+  } catch (error) { mcpDebug('handler:throw', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); throw error; }
+});
+
+const httpServer = createHttpServer(app);
+const wss = new WebSocketServer({ noServer: true });
+httpServer.on('upgrade', (req, socket, head) => {
+  if (req.url !== '/agent') return socket.destroy();
+  if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+  wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+});
+wss.on('connection', ws => {
+  let agentId: string | undefined;
+  let initialized = false;
+  ws.on('message', raw => {
+    try {
+      const message = JSON.parse(raw.toString()) as AgentMessage;
+      if (message.type === 'hello') {
+        if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId');
+        agentId = message.agentId;
+        initialized = true;
+        registry.add(agentId, ws);
+        console.log(`[agent] connected ${agentId} (${message.hostname})`);
+        return;
+      }
+      if (!initialized) return ws.close(4003, 'hello required');
+      registry.handleMessage(message);
+    } catch { ws.close(4004, 'invalid message'); }
+  });
+  ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); });
+});
+
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`MCP gateway listening on :${PORT}`);
+  console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
+  console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
+  console.log(`Debug logging: MCP=${MCP_DEBUG ? 'on' : 'off'}`);
+});
