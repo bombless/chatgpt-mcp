@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgpt-mcp-coding-'));
 process.env.AGENT_WORKSPACE = root;
 process.env.ALLOW_COMMAND_EXECUTION = 'true';
+process.env.ALLOW_NPM_EXECUTION = 'false';
 
 const { runCodingTool } = await import('../src/agent/coding-tools.js');
 
