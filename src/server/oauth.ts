@@ -6,6 +6,7 @@ import { verifyTotp } from './totp.js';
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
 const ACCESS_TOKEN_TTL_MS = Number(process.env.ACCESS_TOKEN_TTL_MS ?? 60 * 60 * 1000);
 const REFRESH_TOKEN_TTL_MS = Number(process.env.REFRESH_TOKEN_TTL_MS ?? 30 * 24 * 60 * 60 * 1000);
+const ENV_TOTP_SECRET = process.env.TOTP_SECRET?.trim();
 const OAUTH_DEBUG = process.env.OAUTH_DEBUG === '1' || process.env.DEBUG_OAUTH === '1';
 const random = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');
 const html = (s: string) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -15,12 +16,28 @@ function oauthDebug(event: string, details: Record<string, unknown> = {}) { if (
 type Client = { clientId: string; redirectUris: string[]; clientName?: string };
 
 export function oauthMetadata() {
-  const metadata = { issuer: PUBLIC_URL, authorization_endpoint: `${PUBLIC_URL}/oauth/authorize`, token_endpoint: `${PUBLIC_URL}/oauth/token`, registration_endpoint: `${PUBLIC_URL}/oauth/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['mcp'] };
+  const metadata = {
+    issuer: PUBLIC_URL,
+    authorization_endpoint: `${PUBLIC_URL}/oauth/authorize`,
+    token_endpoint: `${PUBLIC_URL}/oauth/token`,
+    registration_endpoint: `${PUBLIC_URL}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['none'],
+    scopes_supported: ['mcp'],
+  };
   oauthDebug('metadata', { issuer: metadata.issuer });
   return metadata;
 }
-export function protectedResourceMetadata() {
-  const metadata = { resource: `${PUBLIC_URL}/mcp`, authorization_servers: [PUBLIC_URL], scopes_supported: ['mcp'], bearer_methods_supported: ['header'] };
+export function protectedResourceMetadata(resource = `${PUBLIC_URL}/mcp`) {
+  const metadata = {
+    resource,
+    authorization_servers: [PUBLIC_URL],
+    scopes_supported: ['mcp'],
+    bearer_methods_supported: ['header'],
+    resource_name: 'Windows MCP Gateway',
+  };
   oauthDebug('protected-resource-metadata', { resource: metadata.resource });
   return metadata;
 }
@@ -40,7 +57,7 @@ async function getClient(clientId: string): Promise<Client | undefined> {
   const row = (await getDb()).oauth_clients[clientId];
   return row ? { clientId: row.client_id, redirectUris: row.redirect_uris, clientName: row.client_name ?? undefined } : undefined;
 }
-async function getTotpSecret() { return (await getDb()).totp_config?.secret; }
+async function getTotpSecret() { return (await getDb()).totp_config?.secret ?? ENV_TOTP_SECRET; }
 
 function isChatGptConnectorRedirect(uri: string) {
   try { const url = new URL(uri); return url.protocol === 'https:' && url.hostname === 'chatgpt.com' && url.pathname.startsWith('/connector/oauth/'); } catch { return false; }
@@ -67,7 +84,7 @@ export async function authorizationPage(req: Request) {
   oauthDebug('authorize:start', { clientId: short(clientId), redirectUri, responseType, hasState: Boolean(state), hasCodeChallenge: Boolean(codeChallenge), codeChallengeMethod, resource, clientFound: Boolean(client), existingClient, implicitPublicClient: !existingClient && Boolean(client), redirectUriAllowed });
   const secret = await getTotpSecret();
   if (!client || responseType !== 'code' || !redirectUriAllowed || codeChallengeMethod !== 'S256' || !codeChallenge) { oauthDebug('authorize:rejected', { clientId: short(clientId), responseType, redirectUri, reason: !client ? 'unknown_client' : responseType !== 'code' ? 'unsupported_response_type' : !redirectUriAllowed ? 'redirect_uri_mismatch' : codeChallengeMethod !== 'S256' ? 'unsupported_pkce_method' : 'missing_code_challenge' }); return { status: 400, body: 'Invalid OAuth authorization request.' }; }
-  if (!secret) return { status: 503, body: 'MCP owner authentication is not configured. Open the local admin page at / and configure Authenticator first.' };
+  if (!secret) return { status: 503, body: 'MCP owner authentication is not configured. Set TOTP_SECRET or configure a TOTP secret in the gateway state before using OAuth.' };
   const action = `/oauth/authorize/approve?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge)}`;
   oauthDebug('authorize:page', { clientId: short(clientId), redirectUri });
   return { status: 200, body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Windows MCP</title></head><body style="font-family:system-ui,sans-serif;max-width:640px;margin:60px auto;padding:0 18px"><h2>Authorize Windows MCP</h2><p>${html(client.clientName ?? 'An MCP client')} requests access to your Windows computer through <b>${html(PUBLIC_URL)}</b>.</p><ul><li>Read and write files within configured directories</li><li>Inspect connected Windows agents</li><li>Execute PowerShell only if enabled by the agent policy</li></ul><form method="post" action="${action}"><label>Authenticator code</label><input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required style="display:block;font-size:28px;letter-spacing:8px;width:180px;padding:8px;margin:12px 0"><button style="padding:10px 18px">Authorize</button></form></body></html>` };

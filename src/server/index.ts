@@ -10,10 +10,12 @@ import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../sha
 import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
+import { authCredentials, secretMatches } from './auth.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 const LEGACY_MCP_TOKEN = process.env.MCP_TOKEN;
+const MCP_API_KEY = process.env.MCP_API_KEY ?? process.env.MCP_API_TOKEN;
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 60_000);
 const MCP_DEBUG = process.env.MCP_DEBUG === '1' || process.env.DEBUG_MCP === '1';
@@ -21,7 +23,18 @@ if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
 
 function mcpDebug(event: string, details: Record<string, unknown> = {}) { if (MCP_DEBUG) console.log(`[mcp] ${event} ${JSON.stringify(details)}`); }
 function requestId(req: express.Request) { return req.get('x-request-id') ?? crypto.randomUUID(); }
-function safeAuthInfo(req: express.Request) { const authorization = req.header('authorization'); return { hasAuthorization: Boolean(authorization), scheme: authorization?.split(/\s+/, 1)[0], tokenLength: authorization?.startsWith('Bearer ') ? authorization.slice(7).length : undefined }; }
+function safeAuthInfo(req: express.Request) {
+  const authorization = req.header('authorization');
+  const parts = authorization?.trim().split(/\s+/, 2) ?? [];
+  const apiKeyHeader = ['x-mcp-api-key', 'x-api-key', 'x-goog-api-key'].find(name => Boolean(req.header(name)));
+  return {
+    hasAuthorization: Boolean(authorization),
+    scheme: parts[0],
+    tokenLength: parts[0]?.toLowerCase() === 'bearer' ? parts[1]?.length : undefined,
+    hasApiKeyHeader: Boolean(apiKeyHeader),
+    apiKeyHeader,
+  };
+}
 
 class AgentRegistry {
   private readonly agents = new Map<string, WebSocket>();
@@ -47,9 +60,20 @@ function resultContent(value: unknown) {
   console.log('[mcp] agent result returned to model:', text);
   return { content: [{ type: 'text' as const, text }], structuredContent: { result: value } };
 }
-function bearer(req: express.Request) { const value = req.header('authorization'); return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
-async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
-function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
+async function mcpAuthorized(req: express.Request) {
+  const credentials = authCredentials(req);
+  const oauthValid = await validAccessToken(credentials.bearerToken);
+  const legacyValid = secretMatches(credentials.bearerToken, LEGACY_MCP_TOKEN);
+  const apiKeyValid = secretMatches(credentials.apiKey, MCP_API_KEY) ||
+    (credentials.scheme?.toLowerCase() === 'bearer' && secretMatches(credentials.bearerToken, MCP_API_KEY));
+  mcpDebug('authorization:check', { ...safeAuthInfo(req), scheme: credentials.scheme, oauthValid, legacyValid, apiKeyValid });
+  return oauthValid || legacyValid || apiKeyValid;
+}
+function mcpUnauthorized(res: express.Response, req?: express.Request) {
+  if (req) mcpDebug('authorization:rejected', safeAuthInfo(req));
+  res.setHeader('WWW-Authenticate', `Bearer realm=\"mcp\", error=\"invalid_token\", error_description=\"Bearer access token or configured MCP API key required\", scope=\"mcp\", resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource/mcp\"`);
+  return res.status(401).json({ error: 'invalid_token', error_description: 'Bearer access token or configured MCP API key required' });
+}
 
 async function fetchImage(url: string) {
   const response = await fetch(url, { redirect: 'follow' });
@@ -138,9 +162,27 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use((req, res, next) => { const id = requestId(req); res.setHeader('X-Request-Id', id); if (MCP_DEBUG) mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) }); res.on('finish', () => { if (MCP_DEBUG) mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode }); }); next(); });
+app.use((req, res, next) => {
+  const metadataPath = req.path.startsWith('/.well-known/oauth-');
+  const mcpPath = req.path === '/mcp' || req.path === '/mcp/';
+  if (metadataPath || mcpPath) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version, X-MCP-API-Key, X-API-Key, X-Goog-Api-Key');
+    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, WWW-Authenticate');
+  }
+  if (req.method === 'OPTIONS' && (metadataPath || mcpPath)) {
+    res.setHeader('Access-Control-Allow-Methods', mcpPath ? 'GET, POST, DELETE, OPTIONS' : 'GET, HEAD, OPTIONS');
+    return res.status(204).end();
+  }
+  next();
+});
 app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
 app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
 app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
+app.get('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.json(protectedResourceMetadata(`${PUBLIC_URL}/mcp`)));
+app.head('/.well-known/oauth-authorization-server', (_req, res) => res.status(200).end());
+app.head('/.well-known/oauth-protected-resource', (_req, res) => res.status(200).end());
+app.head('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.status(200).end());
 app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
 app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
 app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });

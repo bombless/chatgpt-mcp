@@ -168,6 +168,17 @@ The tracker resolves the MCP session from the SDK handler context first and fall
 
 The repository contains an OAuth-enabled MVP. The gateway exposes MCP at `/mcp`, OAuth authorization/token endpoints, OAuth metadata, and the Windows agent WebSocket at `/agent`.
 
+The public MCP endpoint supports both OAuth and an optional static API key. OAuth remains the preferred choice when the client can open an authorization page and complete the Authenticator approval. OAuth approval needs a TOTP secret in the JSON state or the `TOTP_SECRET` environment variable. For clients such as Gemini Spark that only expose a key field, set `MCP_API_KEY` to a long random value in the gateway environment. The same value can be sent as `X-MCP-API-Key`, `X-API-Key`, `X-Goog-Api-Key`, `Authorization: ApiKey <value>`, or (for clients that only support bearer credentials) `Authorization: Bearer <value>`. The older `MCP_TOKEN` variable is still accepted as a bearer credential for compatibility.
+
+OAuth discovery is available at both the host-level protected-resource document and the path-aware RFC 9728 URL:
+
+```text
+https://bombless.duckdns.org/.well-known/oauth-protected-resource
+https://bombless.duckdns.org/.well-known/oauth-protected-resource/mcp
+```
+
+The second form is important for clients that derive the metadata URL from the `/mcp` resource path.
+
 OAuth/TOTP state is persisted in a small local JSON file. No native database or native Node addon is required, so the gateway only needs Node.js 20+ on Windows or Red Hat.
 
 By default the gateway stores state in `./chatgpt-mcp.json`. Override the location with `DB_PATH` if desired:
@@ -195,6 +206,17 @@ $env:MAX_READ_FILE_BYTES="512000"
 $env:MAX_READ_FILE_LINES="4000"
 npm run agent
 ```
+
+For the gateway, a minimal static-key configuration looks like this:
+
+```powershell
+$env:PUBLIC_URL="https://bombless.duckdns.org"
+$env:AGENT_TOKEN="replace-with-a-long-random-agent-token"
+$env:MCP_API_KEY="replace-with-a-different-long-random-mcp-key"
+npm start
+```
+
+Do not put the key in a URL query string or commit it to the repository. If a client offers both OAuth and API-key modes, use only one mode for a given connection so it does not cache credentials from a failed flow.
 
 `ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`. `MAX_READ_FILE_BYTES` and `MAX_READ_FILE_LINES` control when an unbounded `read_file` call returns metadata instead of a large payload. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
 
@@ -242,7 +264,7 @@ Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
 
 ## Security notes
 
-1. OAuth protects the public MCP endpoint.
+1. OAuth or the explicitly configured `MCP_API_KEY` protects the public MCP endpoint.
 2. `AGENT_TOKEN` protects the Windows WebSocket endpoint.
 3. `AGENT_WORKSPACE` confines filesystem operations.
 4. Command execution is disabled by default.
