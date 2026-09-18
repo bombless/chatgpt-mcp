@@ -413,6 +413,8 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
     case 'npm_run': return runNpmTool('npm_run', args, logCommand);
     case 'npm_install': return runNpmTool('npm_install', args, logCommand);
     case 'npm_init': return runNpmTool('npm_init', args, logCommand);
+    case 'gradle_assemble_debug': return runGradleTool('gradle_assemble_debug', args, logCommand);
+    case 'gradle_install_debug': return runGradleTool('gradle_install_debug', args, logCommand);
     case 'run_python': return runPython(args, logCommand);
     case 'python_job_inspect': return inspectPythonJob(args);
     case 'python_job_kill': return killPythonJob(args);
