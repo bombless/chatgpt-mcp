@@ -27,6 +27,8 @@ Remote MCP gateway for controlling a Windows machine through a Node.js coding ag
 - `npm_run`
 - `npm_install`
 - `npm_init`
+- `gradle_assemble_debug`
+- `gradle_install_debug`
 - `run_python`
 - `run_node`
 - `git_status`
@@ -46,7 +48,9 @@ Git is intentionally exposed as separate, operation-specific tools. There is no 
 
 npm is intentionally exposed as separate, semantic tools. Use `npm_test` for `npm test`, `npm_run` for an existing npm script, `npm_install` for `npm install`, and `npm_init` for `npm init`. There is no generic npm command tool, so the model cannot select an arbitrary npm subcommand.
 
-`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
+Gradle is exposed as separate, fixed-task tools. Use `gradle_assemble_debug` for `gradle assembleDebug` and `gradle_install_debug` for `gradle installDebug`. These tools do not accept arbitrary Gradle arguments.
+
+`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, Gradle tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
 
 ### Browser / CDP
 
@@ -108,6 +112,8 @@ TOOL GUIDANCE
 - npm_run: run one existing npm script; put the script name in args[0] and pass script arguments after `--`.
 - npm_install: install npm dependencies; extra arguments are passed directly to npm install.
 - npm_init: initialize an npm package; extra arguments are passed directly to npm init.
+- gradle_assemble_debug: run `gradle assembleDebug`.
+- gradle_install_debug: run `gradle installDebug`.
 - run_node: use for Node scripts or quick runtime checks.
 - run_python: use for Python scripts/tests.
 - git_status: inspect working-tree and staging state.
