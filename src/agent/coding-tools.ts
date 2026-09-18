@@ -10,6 +10,7 @@ const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
 const MAX_SEARCH_RESULTS = Number(process.env.MAX_SEARCH_RESULTS ?? 500);
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS ?? 120_000);
 let allowCommandExecution = process.env.ALLOW_COMMAND_EXECUTION === 'true';
+const ALLOW_NPM_EXECUTION = process.env.ALLOW_NPM_EXECUTION === 'true';
 
 /** Set the resolved agent permission (environment or secure configuration). */
 export function setCommandExecutionEnabled(enabled: boolean): void {
@@ -203,6 +204,10 @@ function requireCommandExecution() {
   if (!allowCommandExecution) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
 }
 
+function requireNpmExecution() {
+  if (!allowCommandExecution && !ALLOW_NPM_EXECUTION) throw new Error('Npm execution is disabled. Set ALLOW_NPM_EXECUTION=true (or ALLOW_COMMAND_EXECUTION=true) on the agent to enable npm tools.');
+}
+
 function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
   const remaining = Math.max(0, MAX_OUTPUT_BYTES - Buffer.byteLength(current, 'utf8'));
   const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
@@ -325,7 +330,7 @@ function listPythonJobs() {
 }
 
 async function command(name: 'npm' | 'python' | 'node', args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
-  requireCommandExecution();
+  if (name === 'npm') requireNpmExecution(); else requireCommandExecution();
   const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
   const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
 
