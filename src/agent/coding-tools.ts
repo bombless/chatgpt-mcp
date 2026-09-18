@@ -299,6 +299,16 @@ async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_in
   return command('npm', { ...args, args: commandArgs }, logCommand);
 }
 
+async function runGradleTool(tool: 'gradle_assemble_debug' | 'gradle_install_debug', args: Record<string, unknown>, logCommand?: CommandLogger) {
+  requireCommandExecution();
+  const task = tool === 'gradle_assemble_debug' ? 'assembleDebug' : 'installDebug';
+  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
+  if (process.platform === 'win32') {
+    return await exec('cmd.exe', ['/d', '/s', '/c', `gradle.bat ${task}`], cwd, COMMAND_TIMEOUT_MS, logCommand);
+  }
+  return await exec('gradle', [task], cwd, COMMAND_TIMEOUT_MS, logCommand);
+}
+
 async function runPython(args: Record<string, unknown>, logCommand?: CommandLogger) {
   if (args.async === true) return spawnPythonJob(args, logCommand);
   return command('python', args, logCommand);
