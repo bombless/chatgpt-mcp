@@ -37,6 +37,8 @@ export type ToolName =
   | 'npm_run'
   | 'npm_install'
   | 'npm_init'
+  | 'gradle_assemble_debug'
+  | 'gradle_install_debug'
   | 'run_python'
   | 'python_job_inspect'
   | 'python_job_kill'
