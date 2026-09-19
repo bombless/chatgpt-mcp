@@ -170,6 +170,8 @@ The repository contains an OAuth-enabled MVP. The gateway exposes MCP at `/mcp`,
 
 The public MCP endpoint supports both OAuth and an optional static API key. OAuth remains the preferred choice when the client can open an authorization page and complete the Authenticator approval. OAuth approval needs a TOTP secret in the JSON state or the `TOTP_SECRET` environment variable. For clients such as Gemini Spark that only expose a key field, set `MCP_API_KEY` to a long random value in the gateway environment. The same value can be sent as `X-MCP-API-Key`, `X-API-Key`, `X-Goog-Api-Key`, `Authorization: ApiKey <value>`, or (for clients that only support bearer credentials) `Authorization: Bearer <value>`. The older `MCP_TOKEN` variable is still accepted as a bearer credential for compatibility.
 
+Set `MCP_LOG=1` on the gateway to diagnose connection failures. It logs timestamps, request paths, MCP protocol headers, authentication presence/result, OAuth events, response status, and latency, but never logs credential values or request bodies. `MCP_DEBUG`/`DEBUG_MCP` and `OAUTH_DEBUG`/`DEBUG_OAUTH` remain accepted aliases.
+
 OAuth discovery is available at both the host-level protected-resource document and the path-aware RFC 9728 URL:
 
 ```text

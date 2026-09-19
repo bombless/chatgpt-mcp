@@ -18,10 +18,13 @@ const LEGACY_MCP_TOKEN = process.env.MCP_TOKEN;
 const MCP_API_KEY = process.env.MCP_API_KEY ?? process.env.MCP_API_TOKEN;
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 60_000);
-const MCP_DEBUG = process.env.MCP_DEBUG === '1' || process.env.DEBUG_MCP === '1';
+const isEnabled = (value: string | undefined) => ['1', 'true', 'yes', 'on'].includes(value?.trim().toLowerCase() ?? '');
+// MCP_LOG is the public, backwards-compatible switch for request diagnostics.
+// Keep the older debug names working for existing deployments.
+const MCP_LOG = isEnabled(process.env.MCP_LOG) || isEnabled(process.env.MCP_DEBUG) || isEnabled(process.env.DEBUG_MCP);
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
 
-function mcpDebug(event: string, details: Record<string, unknown> = {}) { if (MCP_DEBUG) console.log(`[mcp] ${event} ${JSON.stringify(details)}`); }
+function mcpDebug(event: string, details: Record<string, unknown> = {}) { if (MCP_LOG) console.log(`[mcp] ${new Date().toISOString()} ${event} ${JSON.stringify(details)}`); }
 function requestId(req: express.Request) { return req.get('x-request-id') ?? crypto.randomUUID(); }
 function safeAuthInfo(req: express.Request) {
   const authorization = req.header('authorization');
@@ -33,6 +36,10 @@ function safeAuthInfo(req: express.Request) {
     tokenLength: parts[0]?.toLowerCase() === 'bearer' ? parts[1]?.length : undefined,
     hasApiKeyHeader: Boolean(apiKeyHeader),
     apiKeyHeader,
+    userAgent: req.get('user-agent'),
+    origin: req.get('origin'),
+    protocolVersion: req.get('mcp-protocol-version'),
+    hasSessionId: Boolean(req.get('mcp-session-id')),
   };
 }
 
@@ -57,7 +64,7 @@ class AgentRegistry {
 const registry = new AgentRegistry();
 function resultContent(value: unknown) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  console.log('[mcp] agent result returned to model:', text);
+  mcpDebug('tool:result', { resultType: typeof value, resultLength: text.length });
   return { content: [{ type: 'text' as const, text }], structuredContent: { result: value } };
 }
 async function mcpAuthorized(req: express.Request) {
@@ -161,7 +168,13 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
-app.use((req, res, next) => { const id = requestId(req); res.setHeader('X-Request-Id', id); if (MCP_DEBUG) mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) }); res.on('finish', () => { if (MCP_DEBUG) mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode }); }); next(); });
+app.use((req, res, next) => {
+  const id = requestId(req), startedAt = Date.now();
+  res.setHeader('X-Request-Id', id);
+  mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), contentLength: req.get('content-length'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) });
+  res.on('finish', () => mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode, contentType: res.get('content-type'), durationMs: Date.now() - startedAt }));
+  next();
+});
 app.use((req, res, next) => {
   const metadataPath = req.path.startsWith('/.well-known/oauth-');
   const mcpPath = req.path === '/mcp' || req.path === '/mcp/';
@@ -232,5 +245,5 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`MCP gateway listening on :${PORT}`);
   console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
   console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
-  console.log(`Debug logging: MCP=${MCP_DEBUG ? 'on' : 'off'}`);
+  console.log(`Request logging: MCP_LOG=${MCP_LOG ? 'on' : 'off'}`);
 });

@@ -7,11 +7,12 @@ const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').re
 const ACCESS_TOKEN_TTL_MS = Number(process.env.ACCESS_TOKEN_TTL_MS ?? 60 * 60 * 1000);
 const REFRESH_TOKEN_TTL_MS = Number(process.env.REFRESH_TOKEN_TTL_MS ?? 30 * 24 * 60 * 60 * 1000);
 const ENV_TOTP_SECRET = process.env.TOTP_SECRET?.trim();
-const OAUTH_DEBUG = process.env.OAUTH_DEBUG === '1' || process.env.DEBUG_OAUTH === '1';
+const isEnabled = (value: string | undefined) => ['1', 'true', 'yes', 'on'].includes(value?.trim().toLowerCase() ?? '');
+const OAUTH_DEBUG = isEnabled(process.env.MCP_LOG) || isEnabled(process.env.OAUTH_DEBUG) || isEnabled(process.env.DEBUG_OAUTH);
 const random = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');
 const html = (s: string) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const short = (value: unknown) => typeof value === 'string' ? `${value.slice(0, 12)}${value.length > 12 ? '…' : ''}` : value;
-function oauthDebug(event: string, details: Record<string, unknown> = {}) { if (OAUTH_DEBUG) console.log(`[oauth] ${event} ${JSON.stringify(details)}`); }
+function oauthDebug(event: string, details: Record<string, unknown> = {}) { if (OAUTH_DEBUG) console.log(`[oauth] ${new Date().toISOString()} ${event} ${JSON.stringify(details)}`); }
 
 type Client = { clientId: string; redirectUris: string[]; clientName?: string };
 
