@@ -222,6 +222,20 @@ Do not put the key in a URL query string or commit it to the repository. If a cl
 
 `ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace`. `MAX_READ_FILE_BYTES` and `MAX_READ_FILE_LINES` control when an unbounded `read_file` call returns metadata instead of a large payload. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
 
+### Request logging and connection troubleshooting
+
+Transport-level logging is **always on** (silence it with `MCP_QUIET=1`). Every request to `/mcp`, `/.well-known/*`, and `/oauth/*` emits one `http:incoming` line plus one `http:response` line, including method, path, `user-agent`, `accept`, `content-type`, `mcp-protocol-version`, `mcp-session-id`, and whether an `Authorization` header was present. Auth decisions (`authorization:check`, `mcp:unauthorized`), MCP dispatch/result (`mcp:dispatch`, `mcp:complete`, `mcp:error`), body-parse failures (`http:error`, with a raw-body snippet), and the full OAuth lifecycle (`register:*`, `authorize:*`, `token:*`, `access-token:*`) are logged the same way.
+
+Set `MCP_LOG=1` for verbose diagnostics on top of that: per-tool agent calls, tool results, and orphan agent responses.
+
+When a client (e.g. ChatGPT or Gemini) cannot connect, reproduce the attempt and then read the gateway logs (`docker logs`, `journalctl`, or the terminal running `npm start`). Interpretation guide:
+
+- **No `http:incoming` line at all** — the request never reached the gateway. Check DNS/TLS for your public URL and any reverse proxy in front (it must forward `Authorization`, `MCP-Session-Id`, and `MCP-Protocol-Version` headers, and answer CORS preflights).
+- **`http:incoming` on a `/.well-known/*` path but nothing after** — OAuth discovery failed; compare the returned metadata with what the client expects (`resource` must exactly equal the MCP URL the client was configured with).
+- **`oauth:register:rejected` / `oauth:token:rejected`** — dynamic registration or token exchange was rejected; the `error` field says why (e.g. `invalid_grant` from a PKCE or `redirect_uri` mismatch).
+- **`authorization:check` with all of `oauthValid`/`legacyValid`/`apiKeyValid` false** — the client sent no credential the gateway accepts; note the `scheme`/`tokenLength` fields to see what it actually sent.
+- **`http:error` with `SyntaxError ... is not valid JSON`** — the client posted a non-JSON or malformed body; the raw snippet shows exactly what arrived.
+
 For Chrome/Chromium, start the browser with remote debugging enabled on port 9222, for example:
 
 ```powershell

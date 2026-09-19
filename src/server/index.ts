@@ -22,9 +22,18 @@ const isEnabled = (value: string | undefined) => ['1', 'true', 'yes', 'on'].incl
 // MCP_LOG is the public, backwards-compatible switch for request diagnostics.
 // Keep the older debug names working for existing deployments.
 const MCP_LOG = isEnabled(process.env.MCP_LOG) || isEnabled(process.env.MCP_DEBUG) || isEnabled(process.env.DEBUG_MCP);
+const MCP_QUIET = isEnabled(process.env.MCP_QUIET);
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
 
+// mcpDebug: fine-grained, opt-in via MCP_LOG (tool calls, agent messages, results).
 function mcpDebug(event: string, details: Record<string, unknown> = {}) { if (MCP_LOG) console.log(`[mcp] ${new Date().toISOString()} ${event} ${JSON.stringify(details)}`); }
+// mcpLog: always-on lifecycle logging (HTTP transport, auth, OAuth, errors).
+// This is what makes "client X cannot connect" debuggable from server logs alone.
+// Set MCP_QUIET=1 to silence it.
+function mcpLog(event: string, details: Record<string, unknown> = {}) { if (!MCP_QUIET) console.log(`[mcp] ${new Date().toISOString()} ${event} ${JSON.stringify(details)}`); }
+function logHttpExchange(req: express.Request, res: express.Response, startedAt: number) {
+  res.on('finish', () => mcpLog('http:response', { method: req.method, path: req.path, status: res.statusCode, durationMs: Date.now() - startedAt }));
+}
 function requestId(req: express.Request) { return req.get('x-request-id') ?? crypto.randomUUID(); }
 function safeAuthInfo(req: express.Request) {
   const authorization = req.header('authorization');
@@ -73,7 +82,7 @@ async function mcpAuthorized(req: express.Request) {
   const legacyValid = secretMatches(credentials.bearerToken, LEGACY_MCP_TOKEN);
   const apiKeyValid = secretMatches(credentials.apiKey, MCP_API_KEY) ||
     (credentials.scheme?.toLowerCase() === 'bearer' && secretMatches(credentials.bearerToken, MCP_API_KEY));
-  mcpDebug('authorization:check', { ...safeAuthInfo(req), scheme: credentials.scheme, oauthValid, legacyValid, apiKeyValid });
+  mcpLog('authorization:check', { ...safeAuthInfo(req), path: req.path, oauthValid, legacyValid, apiKeyValid });
   return oauthValid || legacyValid || apiKeyValid;
 }
 function mcpUnauthorized(res: express.Response, req?: express.Request) {
@@ -166,13 +175,28 @@ function buildMcpServer() {
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '2mb' }));
+// First-line logger: runs BEFORE body parsing so malformed/unsupported
+// requests (which would otherwise skip every later middleware via the error
+// handler) are still visible. Only MCP/OAuth-facing paths are logged.
+app.use((req, _res, next) => {
+  if (req.path === '/mcp' || req.path.startsWith('/.well-known/') || req.path.startsWith('/oauth/')) {
+    mcpLog('http:incoming', { method: req.method, path: req.path, userAgent: req.get('user-agent'), accept: req.get('accept'), contentType: req.get('content-type'), contentLength: req.get('content-length'), mcpProtocolVersion: req.get('mcp-protocol-version'), mcpSessionId: req.get('mcp-session-id'), hasAuthorization: Boolean(req.get('authorization')) });
+  }
+  next();
+});
+app.use(express.json({ limit: '2mb', verify: (req, _res, buf) => { (req as express.Request & { rawBody?: Buffer }).rawBody = buf; } }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
+function rawBodySnippet(req: express.Request, max = 500) {
+  const raw = (req as express.Request & { rawBody?: Buffer }).rawBody;
+  if (!raw) return undefined;
+  const text = raw.toString('utf8', 0, Math.min(raw.length, max));
+  return raw.length > max ? `${text}…(${raw.length} bytes)` : text;
+}
 app.use((req, res, next) => {
   const id = requestId(req), startedAt = Date.now();
   res.setHeader('X-Request-Id', id);
+  logHttpExchange(req, res, startedAt);
   mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), contentLength: req.get('content-length'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) });
-  res.on('finish', () => mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode, contentType: res.get('content-type'), durationMs: Date.now() - startedAt }));
   next();
 });
 app.use((req, res, next) => {
@@ -196,28 +220,40 @@ app.get('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.json(pro
 app.head('/.well-known/oauth-authorization-server', (_req, res) => res.status(200).end());
 app.head('/.well-known/oauth-protected-resource', (_req, res) => res.status(200).end());
 app.head('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.status(200).end());
-app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
+app.post('/oauth/register', async (req, res) => { try { const result = await registerClient(req.body); mcpLog('oauth:register:success', { clientId: String(result.client_id).slice(0, 12), clientName: result.client_name, redirectUriCount: result.redirect_uris?.length }); res.status(201).json(result); } catch (e) { mcpLog('oauth:register:rejected', { error: String(e instanceof Error ? e.message : e), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, rawBody: rawBodySnippet(req) }); res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
 app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
 app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
-app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
+app.post('/oauth/token', async (req, res) => { try { const tokens = await exchangeToken(req.body); mcpLog('oauth:token:success', { grantType: req.body?.grant_type }); res.json(tokens); } catch (e) { const error = String(e instanceof Error ? e.message : e); mcpLog('oauth:token:rejected', { grantType: req.body?.grant_type, error, bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, rawBody: rawBodySnippet(req) }); res.status(400).json({ error }); } });
 app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req); res.json({ agents: registry.list() }); });
 
 const toBuffer = (chunk: unknown) => { if (Buffer.isBuffer(chunk)) return chunk; if (chunk instanceof Uint8Array) return Buffer.from(chunk); if (chunk instanceof ArrayBuffer) return Buffer.from(chunk); return Buffer.from(String(chunk)); };
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
 app.all('/mcp', async (req, res) => {
-  if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
+  if (!await mcpAuthorized(req)) { mcpLog('mcp:unauthorized', safeAuthInfo(req)); return mcpUnauthorized(res, req); }
+  mcpLog('mcp:dispatch', { method: req.method, contentType: req.get('content-type'), accept: req.get('accept'), mcpProtocolVersion: req.get('mcp-protocol-version'), mcpSessionId: req.get('mcp-session-id'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined });
   mcpDebug('handler:dispatch', { method: req.method, contentType: req.get('content-type'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined });
   try {
     const result = mcpHandler(req, res, req.body);
-    if (result && typeof (result as Promise<unknown>).then === 'function') void (result as Promise<unknown>).then(() => mcpDebug('handler:complete', { method: req.method })).catch(error => mcpDebug('handler:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }));
-  } catch (error) { mcpDebug('handler:throw', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); throw error; }
+    if (result && typeof (result as Promise<unknown>).then === 'function') void (result as Promise<unknown>)
+      .then(() => { mcpDebug('handler:complete', { method: req.method }); mcpLog('mcp:complete', { method: req.method, mcpSessionId: req.get('mcp-session-id') }); })
+      .catch(error => { mcpLog('mcp:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); mcpDebug('handler:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); });
+  } catch (error) { mcpLog('mcp:throw', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); mcpDebug('handler:throw', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); throw error; }
+});
+
+// Global error handler: catches body-parse failures (malformed JSON, oversized
+// bodies) that bypass every route-level try/catch. Without this, Express returns
+// a bare HTML 400 and the rejected request leaves no trace in the logs.
+app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  mcpLog('http:error', { method: req.method, path: req.path, error: String(error instanceof Error ? error.stack ?? error.message : error), contentType: req.get('content-type'), rawBody: rawBodySnippet(req) });
+  if (res.headersSent) return res.end();
+  res.status(400).json({ error: 'bad_request', error_description: error instanceof Error ? error.message : 'Request processing failed' });
 });
 
 const httpServer = createHttpServer(app);
 const wss = new WebSocketServer({ noServer: true });
 httpServer.on('upgrade', (req, socket, head) => {
-  if (req.url !== '/agent') return socket.destroy();
-  if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n'); socket.destroy(); return; }
+  if (req.url !== '/agent') { mcpLog('upgrade:rejected', { url: req.url, reason: 'unknown_path' }); return socket.destroy(); }
+  if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { mcpLog('upgrade:rejected', { url: req.url, reason: 'bad_agent_token' }); socket.write('HTTP/1.1 401 Unauthorized\\r\\n\\r\\n'); socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
 wss.on('connection', ws => {
@@ -245,5 +281,5 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`MCP gateway listening on :${PORT}`);
   console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
   console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
-  console.log(`Request logging: MCP_LOG=${MCP_LOG ? 'on' : 'off'}`);
+  console.log(`Request logging: always-on (quiet=${MCP_QUIET}), diagnostics MCP_LOG=${MCP_LOG ? 'on' : 'off'}`);
 });
