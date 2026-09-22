@@ -45,7 +45,8 @@ class AgentRegistry {
 const registry = new AgentRegistry();
 function resultContent(value: unknown) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  console.log('[mcp] agent result returned to model:', text);
+  const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
+  console.log('[mcp][' + time +'] agent result returned to model:', text);
   return {
     content: [{ type: 'text' as const, text }],
     structuredContent: { result: value },
@@ -212,7 +213,8 @@ wss.on('connection', ws => {
       registry.handleMessage(message);
     } catch { ws.close(4004, 'invalid message'); }
   });
-  ws.on('close', () => { if (agentId) console.log(`[agent] disconnected ${agentId}`); });
+  const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
+  ws.on('close', () => { if (agentId) console.log(`[agent][${time}] disconnected ${agentId}`); });
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
