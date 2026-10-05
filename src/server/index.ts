@@ -165,6 +165,7 @@ app.use((req, res, next) => { const id = requestId(req); res.setHeader('X-Reques
 app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
 app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
 app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
+app.get('/.well-known/oauth-protected-resource/mcp', (_req, res) => res.json(protectedResourceMetadata()));
 app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
 app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
 app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
