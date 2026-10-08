@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
+import tls from 'node:tls';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cdpCall, cdpListTargets, cdpVersion } from './cdp.js';
@@ -41,6 +43,185 @@ export function assertAllowed(target: string): string {
   const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
   if (normalized !== root && !normalized.startsWith(root + path.sep)) throw new Error(`Path is outside agent workspace: ${resolved}`);
   return resolved;
+}
+
+
+type ProxyTestResult = {
+  ok: boolean;
+  url: string;
+  proxy: string;
+  proxyConnected: boolean;
+  status?: number;
+  statusText?: string;
+  elapsedMs: number;
+  error?: string;
+};
+
+function proxyTestError(result: ProxyTestResult, error: unknown): ProxyTestResult {
+  return {
+    ...result,
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+async function readHttpHeaders(socket: net.Socket | tls.TLSSocket, timeoutMs: number) {
+  return await new Promise<{ status: number; statusText: string; rest: Buffer }>((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error(`Timed out after ${timeoutMs}ms waiting for HTTP response`)), timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off('data', onData);
+      socket.off('error', onError);
+      socket.off('close', onClose);
+    };
+    const finish = (error?: Error, value?: { status: number; statusText: string; rest: Buffer }) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error); else resolve(value!);
+    };
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const end = buffer.indexOf(Buffer.from('\r\n\r\n'));
+      if (end < 0) return;
+      const headerText = buffer.subarray(0, end).toString('latin1');
+      const firstLine = headerText.split('\r\n', 1)[0] ?? '';
+      const match = /^HTTP\\/\\d(?:\\.\\d)?\\s+(\\d{3})\\s*(.*)$/u.exec(firstLine);
+      if (!match) {
+        finish(new Error(`Invalid HTTP response from proxy/target: ${firstLine || 'empty response'}`));
+        return;
+      }
+      finish(undefined, {
+        status: Number(match[1]),
+        statusText: match[2] ?? '',
+        rest: buffer.subarray(end + 4),
+      });
+    };
+    const onError = (error: Error) => finish(error);
+    const onClose = () => finish(new Error('Connection closed before an HTTP response was received'));
+    socket.on('data', onData);
+    socket.once('error', onError);
+    socket.once('close', onClose);
+  });
+}
+
+function connectSocket(host: string, port: number, timeoutMs: number) {
+  return new Promise<net.Socket>((resolve, reject) => {
+    const socket = net.connect({ host, port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Timed out after ${timeoutMs}ms connecting to ${host}:${port}`));
+    }, timeoutMs);
+    const onConnect = () => {
+      clearTimeout(timer);
+      socket.off('error', onError);
+      resolve(socket);
+    };
+    const onError = (error: Error) => {
+      clearTimeout(timer);
+      socket.destroy();
+      reject(error);
+    };
+    socket.once('connect', onConnect);
+    socket.once('error', onError);
+  });
+}
+
+export async function testHttpProxy(urlString: string, proxyHost = '127.0.0.1', proxyPort = 7897): Promise<ProxyTestResult> {
+  const startedAt = Date.now();
+  const baseResult: ProxyTestResult = {
+    ok: false,
+    url: urlString,
+    proxy: `http://${proxyHost}:${proxyPort}`,
+    proxyConnected: false,
+    elapsedMs: 0,
+  };
+
+  let target: URL;
+  try {
+    target = new URL(urlString);
+  } catch {
+    return proxyTestError({ ...baseResult, elapsedMs: Date.now() - startedAt }, new Error('url must be a valid absolute URL'));
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    return proxyTestError({ ...baseResult, elapsedMs: Date.now() - startedAt }, new Error('url must use http:// or https://'));
+  }
+
+  const timeoutMs = Math.max(1000, Number(process.env.PROXY_TEST_TIMEOUT_MS ?? 10_000));
+  let socket: net.Socket | tls.TLSSocket | undefined;
+  try {
+    socket = await connectSocket(proxyHost, proxyPort, timeoutMs);
+    baseResult.proxyConnected = true;
+
+    if (target.protocol === 'https:') {
+      const targetPort = Number(target.port || 443);
+      socket.write(
+        `CONNECT ${target.hostname}:${targetPort} HTTP/1.1\\r\\nHost: ${target.hostname}:${targetPort}\\r\\nProxy-Connection: Keep-Alive\\r\\nConnection: Keep-Alive\\r\\n\\r\\n`
+      );
+      const connectResponse = await readHttpHeaders(socket, timeoutMs);
+      if (connectResponse.status !== 200) {
+        return {
+          ...baseResult,
+          status: connectResponse.status,
+          statusText: connectResponse.statusText,
+          elapsedMs: Date.now() - startedAt,
+          error: `Proxy CONNECT failed: HTTP ${connectResponse.status} ${connectResponse.statusText}`.trim(),
+        };
+      }
+      if (connectResponse.rest.length > 0) socket.unshift(connectResponse.rest);
+      const secureSocket = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
+      socket = secureSocket;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          secureSocket.destroy();
+          reject(new Error(`Timed out after ${timeoutMs}ms establishing TLS`));
+        }, timeoutMs);
+        const onSecure = () => {
+          clearTimeout(timer);
+          secureSocket.off('error', onError);
+          resolve();
+        };
+        const onError = (error: Error) => {
+          clearTimeout(timer);
+          reject(error);
+        };
+        secureSocket.once('secureConnect', onSecure);
+        secureSocket.once('error', onError);
+      });
+      const portSuffix = target.port ? `:${target.port}` : '';
+      secureSocket.write(
+        `GET ${target.pathname || '/'}${target.search} HTTP/1.1\\r\\nHost: ${target.hostname}${portSuffix}\\r\\nConnection: close\\r\\nUser-Agent: chatgpt-mcp-proxy-test\\r\\nAccept: */*\\r\\n\\r\\n`
+      );
+      const response = await readHttpHeaders(secureSocket, timeoutMs);
+      return {
+        ...baseResult,
+        ok: response.status >= 200 && response.status < 400,
+        status: response.status,
+        statusText: response.statusText,
+        elapsedMs: Date.now() - startedAt,
+      };
+    }
+
+    const portSuffix = target.port ? `:${target.port}` : '';
+    socket.write(
+      `GET ${target.href} HTTP/1.1\\r\\nHost: ${target.hostname}${portSuffix}\\r\\nConnection: close\\r\\nUser-Agent: chatgpt-mcp-proxy-test\\r\\nAccept: */*\\r\\n\\r\\n`
+    );
+    const response = await readHttpHeaders(socket, timeoutMs);
+    return {
+      ...baseResult,
+      ok: response.status >= 200 && response.status < 400,
+      status: response.status,
+      statusText: response.statusText,
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return proxyTestError({ ...baseResult, elapsedMs: Date.now() - startedAt }, error);
+  } finally {
+    socket?.destroy();
+  }
 }
 
 function stringArg(args: Record<string, unknown>, name: string): string {
@@ -432,6 +613,7 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
     case 'apply_patch': return applyPatch(args, logCommand);
     case 'edit_file': return editFile(args);
     case 'find_files': return findFiles(args, logCommand);
+    case 'test_proxy_7897': return testHttpProxy(stringArg(args, 'url'));
     case 'cdp_version': return cdpVersion();
     case 'cdp_list_targets': return cdpListTargets();
     case 'cdp_call': return cdpCall(args);
