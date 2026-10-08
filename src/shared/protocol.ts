@@ -55,6 +55,7 @@ export type ToolName =
   | 'git'
   | 'apply_patch'
   | 'find_files'
+  | 'test_proxy_7897'
   | 'cdp_version'
   | 'cdp_list_targets'
   | 'cdp_call';
