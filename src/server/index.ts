@@ -97,6 +97,25 @@ function buildMcpServer() {
   server.registerTool('delete_file', { description: 'Delete a Windows file or empty directory.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string() }) }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'delete_file', { path, intent })));
   server.registerTool('execute_powershell', { description: 'Execute PowerShell 7.1 on Windows. Agent policy may disable it.', inputSchema: input({ agentId: agentIdSchema, command: z.string().min(1) }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, command, intent }) => resultContent(await registry.call(agentId, 'execute_powershell', { command, intent })));
   server.registerTool('execute_bash', { description: 'Execute Bash on a Linux agent started with --linux. Agent policy may disable it.', inputSchema: input({ agentId: agentIdSchema, command: z.string().min(1) }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, command, intent }) => resultContent(await registry.call(agentId, 'execute_bash', { command, intent })));
+
+  server.registerTool('test_proxy_7897', {
+    description: 'Test the Windows HTTP proxy at 127.0.0.1:7897 by requesting a URL through it. Defaults to https://www.google.com.',
+    inputSchema: input({ agentId: agentIdSchema, url: z.string().url().default('https://www.google.com') }),
+    outputSchema: z.object({
+      result: z.object({
+        ok: z.boolean(),
+        url: z.string(),
+        proxy: z.string(),
+        proxyConnected: z.boolean(),
+        status: z.number().int().optional(),
+        statusText: z.string().optional(),
+        elapsedMs: z.number(),
+        error: z.string().optional(),
+      }),
+    }),
+  }, async ({ agentId, url, intent }) =>
+    resultContent(await registry.call(agentId, 'test_proxy_7897', { url, intent }))
+  );
   server.registerTool('get_system_info', { description: 'Get basic Windows or Linux system information.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
 
   server.registerTool('fetch_image_block', { description: 'Fetch an image URL and return it as an MCP image content block. Useful for testing whether the MCP client renders image blocks.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.unknown() }) }, async ({ url }) => {
