@@ -130,7 +130,7 @@ function connectSocket(host: string, port: number, timeoutMs: number) {
   });
 }
 
-async function testHttpProxy(urlString: string, proxyHost = '127.0.0.1', proxyPort = 7897): Promise<ProxyTestResult> {
+export async function testHttpProxy(urlString: string, proxyHost = '127.0.0.1', proxyPort = 7897): Promise<ProxyTestResult> {
   const startedAt = Date.now();
   const baseResult: ProxyTestResult = {
     ok: false,
