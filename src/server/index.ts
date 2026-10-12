@@ -1,5 +1,8 @@
 import { createServer as createHttpServer } from 'node:http';
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import QRCode from 'qrcode';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -11,6 +14,8 @@ import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedReso
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 import { applyNativePatch } from './native-patch.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
@@ -189,6 +194,20 @@ app.get('/oauth/authorize', async (req, res) => { const result = await authoriza
 app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
 app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
 app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req); res.json({ agents: registry.list() }); });
+
+function isLocalAdminRequest(req: express.Request) { const ip = req.socket.remoteAddress ?? ''; const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'; const fromCaddy = req.get('X-From-Caddy') === 'true'; return loopback && !fromCaddy; }
+
+app.get('/', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  res.type('html').send(readFileSync(resolve(__dirname, 'admin.html'), 'utf8'));
+});
+
+app.get('/_admin/totp', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  try { const db = await getDb(); let config = db.totp_config; if (!config) { const now = Date.now(); config = { secret: randomBase32(), created_at: now, updated_at: now }; db.totp_config = config; await saveDb(db); } const account = 'owner'; const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account); const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 }); res.json({ configured: true, account, qrDataUrl }); } catch (e) { res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) }); }
+});
+
+app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({ error: 'tool not allowed in admin UI' }); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ ok: true, result }); } catch (e) { res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) }); } });
 
 const toBuffer = (chunk: unknown) => {
   if (Buffer.isBuffer(chunk)) return chunk;
