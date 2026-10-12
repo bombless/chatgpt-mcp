@@ -48,6 +48,7 @@ test('cleanup removes only expired sessions', () => {
   const tracker = new ToolUsageTracker();
   tracker.recordStart('session-a', 'read_file');
   tracker.recordSuccess('session-a', 'read_file');
-  assert.equal(tracker.cleanup(Number.MAX_SAFE_INTEGER), 1);
+  tracker.start('session-a').lastActivityAt = 0;
+  assert.equal(tracker.cleanup(), 1);
   assert.deepEqual(tracker.get('session-a').tools, []);
 });
