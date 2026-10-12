@@ -89,7 +89,7 @@ async function readHttpHeaders(socket: net.Socket | tls.TLSSocket, timeoutMs: nu
       if (end < 0) return;
       const headerText = buffer.subarray(0, end).toString('latin1');
       const firstLine = headerText.split('\r\n', 1)[0] ?? '';
-      const match = /^HTTP\\/\\d(?:\\.\\d)?\\s+(\\d{3})\\s*(.*)$/u.exec(firstLine);
+      const match = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\s*(.*)$/u.exec(firstLine);
       if (!match) {
         finish(new Error(`Invalid HTTP response from proxy/target: ${firstLine || 'empty response'}`));
         return;
