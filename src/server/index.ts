@@ -1,7 +1,8 @@
 import { createServer as createHttpServer } from 'node:http';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import QRCode from 'qrcode';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -13,6 +14,8 @@ import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedReso
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 import { applyNativePatch } from './native-patch.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
