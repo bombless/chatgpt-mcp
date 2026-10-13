@@ -14,17 +14,17 @@ const AGENT_ID = process.env.AGENT_ID ?? os.hostname();
 const AGENT_VERSION = '0.2.0';
 const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
 const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
-const LINUX_MODE = process.argv.includes('--linux');
+const IS_WINDOWS = process.platform === 'win32';
+const IS_LINUX = process.platform === 'linux';
 
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
-if (LINUX_MODE && process.platform !== 'linux') throw new Error('--linux can only be used on Linux');
 
-const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (LINUX_MODE ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
+const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (IS_LINUX ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
 
 function assertAllowed(target: string, operation: string) {
   const resolved = path.resolve(target);
-  const normalizedResolved = LINUX_MODE ? resolved : resolved.toLowerCase();
-  const normalizedRoot = LINUX_MODE ? WORKSPACE_ROOT : WORKSPACE_ROOT.toLowerCase();
+  const normalizedResolved = IS_WINDOWS ? resolved.toLowerCase() : resolved;
+  const normalizedRoot = IS_WINDOWS ? WORKSPACE_ROOT.toLowerCase() : WORKSPACE_ROOT;
   const ok = normalizedResolved === normalizedRoot || normalizedResolved.startsWith(normalizedRoot + path.sep);
   if (!ok) throw new Error(`Path is outside agent workspace: ${resolved}`);
   return resolved;
@@ -64,7 +64,7 @@ async function run(request: AgentRequest): Promise<unknown> {
       return { ok: true, path: target };
     }
     case 'execute_powershell': {
-      if (LINUX_MODE) throw new Error('execute_powershell is only available on Windows; use execute_bash on Linux.');
+      if (!IS_WINDOWS) throw new Error('execute_powershell is only available on Windows; use execute_bash on Linux.');
       if (!ALLOW_COMMAND_EXECUTION) throw new Error('PowerShell execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Windows agent to enable it.');
       const command = String(request.args.command);
       logCommand(`pwsh.exe -NoLogo -NoProfile -NonInteractive -Command ${command}`);
@@ -76,7 +76,7 @@ async function run(request: AgentRequest): Promise<unknown> {
       }
     }
     case 'execute_bash': {
-      if (!LINUX_MODE) throw new Error('execute_bash is only available in Linux mode; start the agent with --linux.');
+      if (!IS_LINUX) throw new Error('execute_bash is only available on Linux.');
       if (!ALLOW_COMMAND_EXECUTION) throw new Error('Bash execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the Linux agent to enable it.');
       const command = String(request.args.command);
       logCommand(`bash -lc ${JSON.stringify(command)}`);
@@ -117,7 +117,7 @@ function connect() {
   ws.on('error', error => console.error('[agent] websocket error:', error.message));
 }
 
-console.log(`[agent] mode: ${LINUX_MODE ? 'linux/bash' : 'windows/powershell'}`);
+console.log(`[agent] mode: ${IS_WINDOWS ? 'windows/powershell' : IS_LINUX ? 'linux/bash' : process.platform}`);
 console.log(`[agent] workspace: ${WORKSPACE_ROOT}`);
 console.log(`[agent] command execution: ${ALLOW_COMMAND_EXECUTION ? 'ENABLED' : 'DISABLED'}`);
 connect();
