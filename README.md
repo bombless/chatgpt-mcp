@@ -1,6 +1,6 @@
 # chatgpt-mcp
 
-Remote MCP gateway for controlling a Windows machine through a Node.js coding agent.
+Remote MCP gateway for controlling a Windows or Linux machine through a Node.js coding agent.
 
 ## Tools
 
@@ -217,7 +217,7 @@ ChatGPT
 Gateway
    | WSS
    v
-Windows Node.js agent
+Node.js agent (Windows or Linux)
    +-- filesystem
    +-- rg
    +-- git
@@ -226,7 +226,7 @@ Windows Node.js agent
    +-- CDP -> 127.0.0.1:9222
 ```
 
-The Windows machine does not need an inbound port. It opens the WebSocket connection to the gateway and reconnects after a dropped connection. The browser's CDP port is local to the Windows machine and is not proxied as a listening network port by the agent.
+The agent machine does not need an inbound port. It opens the WebSocket connection to the gateway and reconnects after a dropped connection. The browser's CDP port is local to the Windows machine and is not proxied as a listening network port by the agent.
 
 ## Development
 
@@ -238,7 +238,7 @@ npm run test:coding
 npm run test:tool-usage
 ```
 
-Run the gateway with `npm run dev` and the Windows agent with `npm run agent`.
+Run the gateway with `npm run dev` and the agent with `npm run agent`. The agent detects the operating system automatically; no `--linux` flag is needed.
 
 ## Security notes
 
