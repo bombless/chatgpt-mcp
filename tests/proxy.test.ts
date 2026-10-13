@@ -1,51 +1,30 @@
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import { test } from 'node:test';
-import { testHttpProxy } from '../src/agent/coding-tools.js';
+import { getProxyInfo } from '../src/agent/coding-tools.js';
 
-test('testHttpProxy sends HTTP requests through an HTTP proxy', async () => {
-  const target = http.createServer((_req, res) => {
-    res.writeHead(200, { 'content-type': 'text/plain' });
-    res.end('ok');
+test('getProxyInfo reads common proxy environment variables case-insensitively', () => {
+  const result = getProxyInfo({
+    HTTP_PROXY: 'http://127.0.0.1:7897',
+    https_proxy: 'http://127.0.0.1:10808',
+    NO_PROXY: 'localhost,127.0.0.1',
   });
-  await new Promise<void>((resolve, reject) => {
-    target.listen(0, '127.0.0.1', () => resolve());
-    target.once('error', reject);
-  });
-  const targetAddress = target.address();
-  assert.ok(targetAddress && typeof targetAddress === 'object');
-
-  const proxy = http.createServer((req, res) => {
-    assert.equal(req.url, `http://127.0.0.1:${targetAddress.port}/health`);
-    res.writeHead(200, { 'content-type': 'text/plain' });
-    res.end('proxied');
-  });
-  await new Promise<void>((resolve, reject) => {
-    proxy.listen(0, '127.0.0.1', () => resolve());
-    proxy.once('error', reject);
-  });
-  const proxyAddress = proxy.address();
-  assert.ok(proxyAddress && typeof proxyAddress === 'object');
-
-  try {
-    const result = await testHttpProxy(
-      `http://127.0.0.1:${targetAddress.port}/health`,
-      '127.0.0.1',
-      proxyAddress.port,
-    );
-    assert.equal(result.ok, true);
-    assert.equal(result.proxyConnected, true);
-    assert.equal(result.status, 200);
-    assert.ok(result.elapsedMs >= 0);
-  } finally {
-    await new Promise<void>(resolve => proxy.close(() => resolve()));
-    await new Promise<void>(resolve => target.close(() => resolve()));
-  }
+  assert.equal(result.configured, true);
+  assert.equal(result.proxies.http, 'http://127.0.0.1:7897');
+  assert.equal(result.proxies.https, 'http://127.0.0.1:10808');
+  assert.equal(result.proxies.all, null);
+  assert.equal(result.noProxy, 'localhost,127.0.0.1');
 });
 
-test('testHttpProxy rejects unsupported URLs without connecting', async () => {
-  const result = await testHttpProxy('ftp://example.com/resource', '127.0.0.1', 1);
-  assert.equal(result.ok, false);
-  assert.equal(result.proxyConnected, false);
-  assert.match(result.error ?? '', /http:\/\/ or https:\/\//);
+test('getProxyInfo reports unconfigured when no proxy variables are set', () => {
+  assert.deepEqual(getProxyInfo({}), {
+    configured: false,
+    proxies: { http: null, https: null, all: null },
+    noProxy: null,
+  });
+});
+
+test('getProxyInfo redacts credentials from proxy URLs', () => {
+  const result = getProxyInfo({ ALL_PROXY: 'http://user:secret@proxy.example:1080' });
+  assert.equal(result.proxies.all, 'http://proxy.example:1080');
+  assert.equal(JSON.stringify(result).includes('secret'), false);
 });
