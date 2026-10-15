@@ -453,7 +453,7 @@ async function getScreenInfo() {
       const m = line.match(/(\d+)\/\d+x(\d+)\/\d+\+(-?\d+)\+(-?\d+)/u);
       if (!m) return null;
       return { index, deviceName: line.trim().split(/\s+/u).slice(1).join(' ').replace(/^\+?\*?/u, ''), x: Number(m[3]), y: Number(m[4]), width: Number(m[1]), height: Number(m[2]), primary: line.includes('*') };
-    }).filter(Boolean);
+    }).filter((s): s is NonNullable<typeof s> => s !== null);
     return { platform: process.platform, screens };
   }
   throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
