@@ -178,13 +178,13 @@ try {
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.ok(child.pid);
   await call('kill_process', { pid: child.pid });
-  if (child.exitCode === null) {
+  if (child.exitCode === null && child.signalCode === null) {
     await Promise.race([
       new Promise<void>(resolve => child.once('exit', () => resolve())),
       new Promise(resolve => setTimeout(resolve, 2000)),
     ]);
   }
-  assert.notEqual(child.exitCode, null);
+  assert.ok(child.exitCode !== null || child.signalCode !== null, 'child process should have exited or been terminated by a signal');
 
   await assert.rejects(() => call('read_file_range', { path: path.join(root, '..', 'outside.txt'), startLine: 1, endLine: 1 }), /outside agent workspace/);
   await assert.rejects(() => call('kill_process', { pid: process.pid }), /Refusing to terminate/);
