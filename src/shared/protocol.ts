@@ -32,7 +32,7 @@ export type ToolName =
   | 'delete_file'
   | 'execute_powershell'
   | 'execute_bash'
-  | 'get_system_info'
+  | 'get_system_info'\n  | 'get_screen_info'\n  | 'take_screenshot'
   | 'npm_test'
   | 'npm_run'
   | 'npm_install'
