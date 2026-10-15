@@ -9,6 +9,12 @@ export type DbState = {
   oauth_codes: Record<string, { code: string; client_id: string; redirect_uri: string; code_challenge?: string | null; expires_at: number }>;
   oauth_access_tokens: Record<string, { token: string; client_id: string; expires_at: number }>;
   oauth_refresh_tokens: Record<string, { token: string; client_id: string; expires_at: number }>;
+  improvement_suggestions: Array<{
+    id: string; title: string; description: string;
+    category: 'tooling' | 'reliability' | 'performance' | 'usability' | 'security' | 'other';
+    priority: 'low' | 'medium' | 'high'; status: 'open' | 'planned' | 'done' | 'wont_fix';
+    source?: string; created_at: number; updated_at: number; occurrences: number;
+  }>;
 };
 
 const emptyDb = (): DbState => ({
@@ -17,6 +23,7 @@ const emptyDb = (): DbState => ({
   oauth_codes: {},
   oauth_access_tokens: {},
   oauth_refresh_tokens: {},
+  improvement_suggestions: [],
 });
 
 let dbPromise: Promise<DbState> | undefined;
@@ -38,6 +45,7 @@ async function loadDb(): Promise<DbState> {
       oauth_codes: parsed.oauth_codes ?? {},
       oauth_access_tokens: parsed.oauth_access_tokens ?? {},
       oauth_refresh_tokens: parsed.oauth_refresh_tokens ?? {},
+      improvement_suggestions: parsed.improvement_suggestions ?? [],
     };
   } catch (error) {
     const db = emptyDb();
