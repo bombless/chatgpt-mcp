@@ -19,7 +19,7 @@ const patchFile = path.join(root, 'patch.txt');
 try {
   await fs.writeFile(file, ['one', 'two', 'three', 'needle here', 'five'].join('\n'), 'utf8');
   await fs.writeFile(path.join(root, 'app.ts'), 'export const answer = 41;\n', 'utf8');
-  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "console.log(42)"', lint: 'node -e "console.log(7)"' } }), 'utf8');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true, scripts: { test: 'node -e "console.log(42)"', lint: 'node -e "console.log(7)" --' } }), 'utf8');
 
   const found = await call('find_files', { pattern: '*.ts' }) as any;
   assert.ok(found.files.some((x: string) => x.endsWith('app.ts')));
