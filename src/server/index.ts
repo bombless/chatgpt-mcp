@@ -133,7 +133,7 @@ function buildMcpServer() {
       if (!title || !description || !category) throw new Error('submit requires title, description, and category');
       return resultContent(await submitImprovement({ title, description, category, priority: priority ?? 'medium', relatedTool, evidence }));
     }
-    if (action === 'list') return resultContent(await listImprovements({ status, limit }));
+    if (action === 'list') return resultContent(await listImprovements({ status, category, limit }));
     if (!id || (!status && !priority)) throw new Error('update requires id and at least one of status or priority');
     return resultContent(await updateImprovement({ id, status, priority }));
   });
