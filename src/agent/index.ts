@@ -165,22 +165,63 @@ getConfig().then(config => {
     }
   }
 
+  const HEARTBEAT_INTERVAL_MS = Number(process.env.AGENT_HEARTBEAT_INTERVAL_MS ?? 25_000)
+  const HEARTBEAT_TIMEOUT_MS = Number(process.env.AGENT_HEARTBEAT_TIMEOUT_MS ?? 65_000)
+  let reconnectTimer: NodeJS.Timeout | undefined
+  let reconnectDelayMs = 3_000
+
   function connect () {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = undefined
+    }
+    console.log(`[agent] connecting to ${SERVER_URL}`)
     const ws = new WebSocket(SERVER_URL, {
-      headers: { Authorization: `Bearer ${AGENT_TOKEN}` }
+      headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
+      handshakeTimeout: 15_000
     })
+    let lastPongAt = Date.now()
+    let heartbeatTimer: NodeJS.Timeout | undefined
+    let closed = false
+
+    const scheduleReconnect = (reason: string) => {
+      if (closed) return
+      closed = true
+      if (heartbeatTimer) clearInterval(heartbeatTimer)
+      console.warn(`[agent] connection ended (${reason}); reconnecting in ${reconnectDelayMs}ms`)
+      reconnectTimer = setTimeout(connect, reconnectDelayMs)
+      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000)
+    }
+
     ws.on('open', () => {
-      ws.send(
-        JSON.stringify({
-          type: 'hello',
-          agentId: AGENT_ID,
-          hostname: os.hostname(),
-          platform: process.platform,
-          version: AGENT_VERSION
-        })
-      )
-      console.log(`[agent] connected as ${AGENT_ID}`)
+      reconnectDelayMs = 3_000
+      lastPongAt = Date.now()
+      ws.send(JSON.stringify({
+        type: 'hello',
+        agentId: AGENT_ID,
+        hostname: os.hostname(),
+        platform: process.platform,
+        version: AGENT_VERSION
+      }))
+      console.log(`[agent] connected as ${AGENT_ID}; heartbeat every ${HEARTBEAT_INTERVAL_MS}ms`)
+      heartbeatTimer = setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) return
+        const silenceMs = Date.now() - lastPongAt
+        if (silenceMs > HEARTBEAT_TIMEOUT_MS) {
+          console.error(`[agent] heartbeat timed out after ${silenceMs}ms; terminating stale socket`)
+          ws.terminate()
+          return
+        }
+        try {
+          ws.ping()
+        } catch (error) {
+          console.error('[agent] failed to send heartbeat:', error)
+          ws.terminate()
+        }
+      }, HEARTBEAT_INTERVAL_MS)
+      heartbeatTimer.unref?.()
     })
+    ws.on('pong', () => { lastPongAt = Date.now() })
     ws.on('message', async raw => {
       let request: AgentRequest
       try {
@@ -195,26 +236,13 @@ getConfig().then(config => {
         return
       }
       if (request.type !== 'request' || !request.id || !request.tool) return
-      const intent =
-        typeof request.args?.intent === 'string'
-          ? request.args.intent.trim()
-          : ''
-      const time = `${new Date()
-        .getHours()
-        .toString()
-        .padStart(2, '0')}:${new Date()
-        .getMinutes()
-        .toString()
-        .padStart(2, '0')}`
+      const intent = typeof request.args?.intent === 'string' ? request.args.intent.trim() : ''
+      const now = new Date()
+      const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
       console.log(`[agent][${time}] tool=${request.tool} requestId=${request.id} started`)
       if (intent) console.log(`[agent][${time}] intent: ${intent}`)
-      else
-        console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`)
-      const response: AgentResponse = {
-        type: 'response',
-        id: request.id,
-        ok: false
-      }
+      else console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`)
+      const response: AgentResponse = { type: 'response', id: request.id, ok: false }
       try {
         response.result = await run(request)
         response.ok = true
@@ -225,16 +253,22 @@ getConfig().then(config => {
       if (ws.readyState === WebSocket.OPEN) {
         const serialized = JSON.stringify(response)
         console.log(`[agent][${time}] tool=${request.tool} requestId=${request.id} response=${response.ok ? 'ok' : 'error'} payloadBytes=${Buffer.byteLength(serialized, 'utf8')}`)
-        ws.send(serialized)
-      } else console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: WebSocket is not open; response could not be delivered`)
+        ws.send(serialized, error => {
+          if (error) console.error(`[agent] failed sending response requestId=${request.id}:`, error.message)
+        })
+      } else {
+        console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: WebSocket is not open; response could not be delivered`)
+      }
     })
-    ws.on('close', () => {
-      console.log('[agent] disconnected; reconnecting in 3s')
-      setTimeout(connect, 3000)
+    ws.on('close', (code, reason) => {
+      scheduleReconnect(`close code=${code} reason=${reason.toString() || '(none)'}`)
     })
-    ws.on('error', error =>
+    ws.on('error', error => {
       console.error('[agent] websocket error:', error.message)
-    )
+      // The close event normally follows; terminate to guarantee reconnect if it does not.
+      if (ws.readyState !== WebSocket.CLOSED) ws.terminate()
+      else scheduleReconnect(`error: ${error.message}`)
+    })
   }
 
   console.log(
@@ -253,4 +287,7 @@ getConfig().then(config => {
     }`
   )
   connect()
+}).catch(error => {
+  console.error('[agent] fatal startup error:', error instanceof Error ? error.stack ?? error.message : error)
+  process.exitCode = 1
 })

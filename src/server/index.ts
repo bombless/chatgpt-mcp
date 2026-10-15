@@ -32,26 +32,84 @@ function safeAuthInfo(req: express.Request) { const authorization = req.header('
 
 class AgentRegistry {
   private readonly agents = new Map<string, WebSocket>();
-  private readonly pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  add(agentId: string, socket: WebSocket) { const old = this.agents.get(agentId); old?.close(4000, 'replaced by a newer connection'); this.agents.set(agentId, socket); socket.on('close', () => { if (this.agents.get(agentId) === socket) this.agents.delete(agentId); }); }
-  get(agentId: string) { const socket = this.agents.get(agentId); return socket?.readyState === WebSocket.OPEN ? socket : undefined; }
-  list() { return [...this.agents.keys()]; }
+  private readonly lastPongAt = new WeakMap<WebSocket, number>();
+  private readonly pending = new Map<string, { agentId: string; socket: WebSocket; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  add(agentId: string, socket: WebSocket) {
+    const old = this.agents.get(agentId);
+    if (old && old !== socket) old.close(4000, 'replaced by a newer connection');
+    this.agents.set(agentId, socket);
+    this.lastPongAt.set(socket, Date.now());
+    socket.on('pong', () => this.lastPongAt.set(socket, Date.now()));
+    socket.on('close', () => {
+      if (this.agents.get(agentId) === socket) this.agents.delete(agentId);
+      for (const [id, item] of this.pending) {
+        if (item.socket !== socket) continue;
+        this.pending.delete(id);
+        item.reject(new Error(`Agent '${agentId}' disconnected while request was pending`));
+      }
+    });
+  }
+  get(agentId: string) {
+    const socket = this.agents.get(agentId);
+    if (!socket || socket.readyState !== WebSocket.OPEN) return undefined;
+    const lastPong = this.lastPongAt.get(socket) ?? 0;
+    if (Date.now() - lastPong > 65_000) {
+      mcpDebug('agent:heartbeat-timeout', { agentId, silenceMs: Date.now() - lastPong });
+      socket.terminate();
+      if (this.agents.get(agentId) === socket) this.agents.delete(agentId);
+      return undefined;
+    }
+    return socket;
+  }
+  list() { return [...this.agents.keys()].filter(agentId => this.get(agentId) !== undefined); }
   notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }) {
     const socket = this.get(agentId);
     if (!socket) { mcpDebug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }
-    try { socket.send(JSON.stringify(message)); return true; } catch (error) { mcpDebug('agent-diagnostic:send-error', { agentId, tool: message.tool, error: String(error) }); return false; }
+    try { socket.send(JSON.stringify(message), error => { if (error) mcpDebug('agent-diagnostic:send-error', { agentId, tool: message.tool, error: error.message }); }); return true; }
+    catch (error) { mcpDebug('agent-diagnostic:send-error', { agentId, tool: message.tool, error: String(error) }); return false; }
   }
   async call(agentId: string, tool: ToolName, args: Record<string, unknown>) {
     const socket = this.get(agentId);
-    if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Windows agent '${agentId}' is not connected`); }
-    const id = crypto.randomUUID(); const request: AgentRequest = { type: 'request', id, tool, args }; mcpDebug('agent-call:start', { requestId: id, agentId, tool });
+    if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Agent '${agentId}' is not connected or heartbeat is stale`); }
+    const id = crypto.randomUUID();
+    const request: AgentRequest = { type: 'request', id, tool, args };
+    mcpDebug('agent-call:start', { requestId: id, agentId, tool });
     return await new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); mcpDebug('agent-call:timeout', { requestId: id, agentId, tool, timeoutMs: REQUEST_TIMEOUT_MS }); reject(new Error(`Agent request timed out after ${REQUEST_TIMEOUT_MS}ms`)); }, REQUEST_TIMEOUT_MS);
-      this.pending.set(id, { resolve: value => { clearTimeout(timer); mcpDebug('agent-call:success', { requestId: id, agentId, tool }); resolve(value); }, reject: error => { clearTimeout(timer); mcpDebug('agent-call:error', { requestId: id, agentId, tool, error: error.message }); reject(error); } });
-      try { socket.send(JSON.stringify(request)); } catch (error) { this.pending.delete(id); clearTimeout(timer); mcpDebug('agent-call:send-error', { requestId: id, agentId, tool, error: String(error) }); reject(error instanceof Error ? error : new Error(String(error))); }
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        mcpDebug('agent-call:timeout', { requestId: id, agentId, tool, timeoutMs: REQUEST_TIMEOUT_MS });
+        reject(new Error(`Agent request timed out after ${REQUEST_TIMEOUT_MS}ms`));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(id, {
+        agentId,
+        socket,
+        resolve: value => { clearTimeout(timer); mcpDebug('agent-call:success', { requestId: id, agentId, tool }); resolve(value); },
+        reject: error => { clearTimeout(timer); mcpDebug('agent-call:error', { requestId: id, agentId, tool, error: error.message }); reject(error); }
+      });
+      try {
+        socket.send(JSON.stringify(request), error => {
+          if (!error) return;
+          this.pending.delete(id);
+          clearTimeout(timer);
+          mcpDebug('agent-call:send-error', { requestId: id, agentId, tool, error: error.message });
+          reject(error);
+        });
+      } catch (error) {
+        this.pending.delete(id); clearTimeout(timer);
+        mcpDebug('agent-call:send-error', { requestId: id, agentId, tool, error: String(error) });
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
-  handleMessage(message: AgentMessage) { if (message.type !== 'response') return; const response = message as AgentResponse; const item = this.pending.get(response.id); if (!item) { mcpDebug('agent-response:orphan', { requestId: response.id }); return; } this.pending.delete(response.id); if (response.ok) item.resolve(response.result); else item.reject(new Error(response.error ?? 'Agent request failed')); }
+  handleMessage(message: AgentMessage) {
+    if (message.type !== 'response') return;
+    const response = message as AgentResponse;
+    const item = this.pending.get(response.id);
+    if (!item) { mcpDebug('agent-response:orphan', { requestId: response.id }); return; }
+    this.pending.delete(response.id);
+    if (response.ok) item.resolve(response.result);
+    else item.reject(new Error(response.error ?? 'Agent request failed'));
+  }
 }
 const registry = new AgentRegistry();
 function resultContent(value: unknown) {
@@ -244,9 +302,27 @@ httpServer.on('upgrade', (req, socket, head) => {
   if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
+const HEARTBEAT_INTERVAL_MS = Number(process.env.SERVER_HEARTBEAT_INTERVAL_MS ?? 25_000);
+const HEARTBEAT_TIMEOUT_MS = Number(process.env.SERVER_HEARTBEAT_TIMEOUT_MS ?? 65_000);
 wss.on('connection', ws => {
   let agentId: string | undefined;
   let initialized = false;
+  let alive = true;
+  let heartbeatTimer: NodeJS.Timeout | undefined;
+  ws.on('pong', () => { alive = true; });
+  heartbeatTimer = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!alive) {
+      console.warn(`[agent] heartbeat missed; terminating connection agent=${agentId ?? 'unidentified'}`);
+      ws.terminate();
+      return;
+    }
+    alive = false;
+    ws.ping(error => {
+      if (error) console.warn(`[agent] heartbeat ping failed agent=${agentId ?? 'unidentified'}: ${error.message}`);
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
   ws.on('message', raw => {
     try {
       const message = JSON.parse(raw.toString()) as AgentMessage;
@@ -255,15 +331,22 @@ wss.on('connection', ws => {
         agentId = message.agentId;
         initialized = true;
         registry.add(agentId, ws);
-        console.log(`[agent] connected ${agentId} (${message.hostname})`);
+        console.log(`[agent] connected ${agentId} (${message.hostname}); heartbeat every ${HEARTBEAT_INTERVAL_MS}ms`);
         return;
       }
       if (!initialized) return ws.close(4003, 'hello required');
       registry.handleMessage(message);
-    } catch { ws.close(4004, 'invalid message'); }
+    } catch (error) {
+      console.error(`[agent] invalid message agent=${agentId ?? 'unidentified'}:`, error instanceof Error ? error.message : error);
+      ws.close(4004, 'invalid message');
+    }
   });
-  const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
-  ws.on('close', () => { if (agentId) console.log(`[agent][${time}] disconnected ${agentId}`); });
+  ws.on('error', error => console.error(`[agent] websocket error agent=${agentId ?? 'unidentified'}:`, error.message));
+  ws.on('close', (code, reason) => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    const time = new Date().toISOString();
+    if (agentId) console.log(`[agent][${time}] disconnected ${agentId} code=${code} reason=${reason.toString() || '(none)'}`);
+  });
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
