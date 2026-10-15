@@ -178,7 +178,12 @@ try {
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.ok(child.pid);
   await call('kill_process', { pid: child.pid });
-  await new Promise(resolve => setTimeout(resolve, 300));
+  if (child.exitCode === null) {
+    await Promise.race([
+      new Promise<void>(resolve => child.once('exit', () => resolve())),
+      new Promise(resolve => setTimeout(resolve, 2000)),
+    ]);
+  }
   assert.notEqual(child.exitCode, null);
 
   await assert.rejects(() => call('read_file_range', { path: path.join(root, '..', 'outside.txt'), startLine: 1, endLine: 1 }), /outside agent workspace/);
