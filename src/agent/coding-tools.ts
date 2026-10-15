@@ -311,7 +311,7 @@ async function command(name: 'npm' | 'python' | 'node', args: Record<string, unk
 async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init', args: Record<string, unknown>, logCommand?: CommandLogger) {
   const supplied = Array.isArray(args.args) ? args.args.map(String) : [];
   let commandArgs: string[];
-  switch (tool) {\n    case 'get_screen_info': return getScreenInfo();\n    case 'take_screenshot': return takeScreenshot(args);
+  switch (tool) {
     case 'npm_test':
       commandArgs = ['test', ...supplied];
       break;
@@ -483,6 +483,8 @@ async function takeScreenshot(args: Record<string, unknown>) {
 
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
+    case 'get_screen_info': return getScreenInfo();
+    case 'take_screenshot': return takeScreenshot(args);
     case 'npm_test': return runNpmTool('npm_test', args, logCommand);
     case 'npm_run': return runNpmTool('npm_run', args, logCommand);
     case 'npm_install': return runNpmTool('npm_install', args, logCommand);
