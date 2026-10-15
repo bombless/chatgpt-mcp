@@ -166,9 +166,30 @@ getConfig().then(config => {
   }
 
   function connect () {
-    const ws = new WebSocket(SERVER_URL, {
-      headers: { Authorization: `Bearer ${AGENT_TOKEN}` }
-    })
+    console.log(`[agent] connecting to ${SERVER_URL}`)
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(SERVER_URL, {
+        headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
+        handshakeTimeout: 15_000
+      })
+    } catch (error) {
+      console.error('[agent] websocket construction failed:', error instanceof Error ? error.stack ?? error.message : String(error))
+      setTimeout(connect, 3000)
+      return
+    }
+    let alive = true
+    const heartbeat = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return
+      if (!alive) {
+        console.error('[agent] heartbeat timed out; terminating stale websocket')
+        ws.terminate()
+        return
+      }
+      alive = false
+      try { ws.ping() } catch (error) { console.error('[agent] websocket ping failed:', error instanceof Error ? error.message : String(error)); ws.terminate() }
+    }, 30_000)
+    ws.on('pong', () => { alive = true })
     ws.on('open', () => {
       ws.send(
         JSON.stringify({
@@ -228,13 +249,12 @@ getConfig().then(config => {
         ws.send(serialized)
       } else console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: WebSocket is not open; response could not be delivered`)
     })
-    ws.on('close', () => {
-      console.log('[agent] disconnected; reconnecting in 3s')
+    ws.on('close', (code, reason) => {
+      clearInterval(heartbeat)
+      console.error(`[agent] websocket closed code=${code} reason=${reason.toString() || '(empty)'}; reconnecting in 3s`)
       setTimeout(connect, 3000)
     })
-    ws.on('error', error =>
-      console.error('[agent] websocket error:', error.message)
-    )
+    ws.on('error', error => console.error('[agent] websocket error:', error.stack ?? error.message))
   }
 
   console.log(
@@ -253,4 +273,14 @@ getConfig().then(config => {
     }`
   )
   connect()
+}).catch(error => {
+  console.error('[agent] fatal startup/configuration error:', error instanceof Error ? error.stack ?? error.message : String(error))
+  process.exitCode = 1
+})
+
+process.on('uncaughtException', error => {
+  console.error('[agent] uncaught exception:', error.stack ?? error.message)
+})
+process.on('unhandledRejection', reason => {
+  console.error('[agent] unhandled rejection:', reason instanceof Error ? reason.stack ?? reason.message : String(reason))
 })

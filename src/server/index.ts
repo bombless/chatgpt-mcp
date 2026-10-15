@@ -239,12 +239,28 @@ app.all('/mcp', async (req, res) => {
 
 const httpServer = createHttpServer(app);
 const wss = new WebSocketServer({ noServer: true });
+const aliveSockets = new WeakSet<WebSocket>();
+const heartbeatTimer = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (!aliveSockets.has(ws)) {
+      console.error('[agent][heartbeat] no pong received; terminating stale websocket');
+      ws.terminate();
+      continue;
+    }
+    aliveSockets.delete(ws);
+    try { ws.ping(); } catch (error) { console.error('[agent][heartbeat] ping failed:', error); ws.terminate(); }
+  }
+}, 30_000);
+heartbeatTimer.unref();
 httpServer.on('upgrade', (req, socket, head) => {
   if (req.url !== '/agent') return socket.destroy();
   if (req.headers.authorization !== `Bearer ${AGENT_TOKEN}`) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
 });
 wss.on('connection', ws => {
+  aliveSockets.add(ws);
+  ws.on('pong', () => aliveSockets.add(ws));
   let agentId: string | undefined;
   let initialized = false;
   ws.on('message', raw => {
@@ -263,7 +279,8 @@ wss.on('connection', ws => {
     } catch { ws.close(4004, 'invalid message'); }
   });
   const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
-  ws.on('close', () => { if (agentId) console.log(`[agent][${time}] disconnected ${agentId}`); });
+  ws.on('close', (code, reason) => { if (agentId) console.error(`[agent][${time}] disconnected ${agentId} code=${code} reason=${reason.toString() || '(empty)'}`); });
+  ws.on('error', error => console.error(`[agent][${time}] websocket error${agentId ? ` ${agentId}` : ''}:`, error.message));
 });
 
 httpServer.listen(PORT, '0.0.0.0', () => {
