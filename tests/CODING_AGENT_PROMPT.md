@@ -12,6 +12,7 @@ Rules:
 - Do not expose secrets.
 - Do not claim success without observing the tool result.
 - For destructive actions, only touch files/processes created by this test.
+- CONTINUOUS IMPROVEMENT: During the session, note concrete recurring friction, unclear tool guidance, missing capabilities, confusing errors, redundant workflows, or reliability/safety problems. In the final report, provide a specific MCP improvement suggestion only when supported by what you observed, including the context and expected benefit. Do not invent generic suggestions. Suggestions are feedback only: do not modify the MCP server itself unless the user explicitly asks. Do not send data to external services.
 
 1. FILE DISCOVERY
    - create_directory TEST_ROOT/work
@@ -77,6 +78,7 @@ Then provide:
 - any skipped step and why
 - exact validation commands/results
 - any security concern discovered
+- MCP improvement suggestion(s), if any, with observed evidence and expected benefit; otherwise state that no concrete suggestion was supported by this run
 ```
 
 ## Automated equivalent

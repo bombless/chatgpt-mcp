@@ -15,7 +15,7 @@
     "test:coding": "tsx tests/coding-tools.test.ts",
     "test:tool-usage": "tsx --test tests/tool-usage.test.ts",
     "test:proxy": "tsx --test tests/proxy.test.ts",
-    "test": "tsx --test tests/routes.test.ts tests/tool-usage.test.ts"
+    "test": "tsx --test tests/routes.test.ts tests/tool-usage.test.ts tests/improvement-suggestions.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.0.0",
