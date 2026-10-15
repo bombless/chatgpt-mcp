@@ -23,7 +23,7 @@ async function getConfig () {
     serverUrl: process.env.SERVER_URL || (await get('SERVER_URL')) || 'ws://127.0.0.1:8787/agent',
     agentToken: process.env.AGENT_TOKEN || await get('AGENT_TOKEN'),
     agentId: process.env.AGENT_ID || (await get('AGENT_ID')) || os.hostname(),
-    allowCommandExecution: await get('ALLOW_COMMAND_EXECUTION')
+    allowCommandExecution: process.env.ALLOW_COMMAND_EXECUTION || await get('ALLOW_COMMAND_EXECUTION')
   }
 }
 
