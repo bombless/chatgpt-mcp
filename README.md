@@ -283,3 +283,105 @@ Remote command execution is powerful. Start with PowerShell disabled and add an 
 - `take_screenshot`: returns screenshots as native MCP image content blocks (not Base64 text). By default it captures each detected display separately; pass `screenIndex` from `get_screen_info` to capture one display. The result includes display metadata alongside the images.
 - Windows capture uses .NET/System.Windows.Forms. Linux requires an X11 session plus `xrandr` and ImageMagick's `import` command. Wayland-only sessions are not supported by this implementation.
 
+
+## Automate OAuth with Bash and curl
+
+The authorization flow still requires a **fresh six-digit code from your own Authenticator app**. This script automates the HTTP requests around that user confirmation; it does not bypass TOTP. It uses PKCE (S256), registers a local public OAuth client, submits the code to the approval endpoint, exchanges the authorization code, and saves the token response to a private file.
+
+Requirements: `bash`, `curl`, `jq`, and `openssl`.
+
+Save as `oauth-curl.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+BASE_URL="${BASE_URL:-https://your-gateway.example}"
+REDIRECT_URI="${REDIRECT_URI:-http://127.0.0.1:8765/oauth/callback}"
+TOKEN_FILE="${TOKEN_FILE:-oauth-tokens.json}"
+BASE_URL="${BASE_URL%/}"
+
+for cmd in curl jq openssl; do
+  command -v "$cmd" >/dev/null 2>&1 || {
+    echo "Missing dependency: $cmd" >&2
+    exit 1
+  }
+done
+
+# PKCE verifier must be URL-safe and between 43 and 128 characters.
+VERIFIER="$(openssl rand -hex 32)"
+CHALLENGE="$(printf %s "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=' )"
+STATE="$(openssl rand -hex 16)"
+
+echo "Registering a public OAuth client..."
+CLIENT_JSON="$(curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -nc --arg uri "$REDIRECT_URI" '{client_name:"curl CLI",redirect_uris:[$uri]}')" \
+  "$BASE_URL/oauth/register")"
+CLIENT_ID="$(jq -er '.client_id' <<<"$CLIENT_JSON")"
+
+AUTH_QUERY="$(jq -rn --arg client "$CLIENT_ID" --arg redirect "$REDIRECT_URI" \
+  --arg state "$STATE" --arg challenge "$CHALLENGE" \
+  ' "client_id=" + ($client|@uri)
+  + "&redirect_uri=" + ($redirect|@uri)
+  + "&response_type=code&code_challenge_method=S256"
+  + "&code_challenge=" + ($challenge|@uri)
+  + "&state=" + ($state|@uri) + "&scope=mcp" ')"
+AUTH_URL="$BASE_URL/oauth/authorize?$AUTH_QUERY"
+
+# Fetch the authorization page first so configuration/request errors are visible.
+curl --fail-with-body --silent --show-error "$AUTH_URL" -o /dev/null
+
+read -r -s -p "Enter the six-digit Authenticator code: " TOTP
+printf '\n'
+if [[ ! "$TOTP" =~ ^[0-9]{6}$ ]]; then
+  echo "Expected exactly six digits." >&2
+  exit 1
+fi
+
+# The approval endpoint returns a 302 whose Location contains the authorization code.
+HEADERS="$(mktemp)"
+trap 'rm -f "$HEADERS"' EXIT
+HTTP_CODE="$(curl --silent --show-error -o /dev/null -D "$HEADERS" -w '%{http_code}' \
+  -X POST \
+  --data-urlencode "totp=$TOTP" \
+  "$BASE_URL/oauth/authorize/approve?client_id=$(jq -rn --arg v "$CLIENT_ID" '$v|@uri')&redirect_uri=$(jq -rn --arg v "$REDIRECT_URI" '$v|@uri')&state=$(jq -rn --arg v "$STATE" '$v|@uri')&code_challenge=$(jq -rn --arg v "$CHALLENGE" '$v|@uri')")"
+unset TOTP
+
+if [[ "$HTTP_CODE" != "302" ]]; then
+  echo "Authorization failed (HTTP $HTTP_CODE). Check the code and gateway logs." >&2
+  exit 1
+fi
+
+LOCATION="$(awk 'BEGIN{IGNORECASE=1} /^Location:/ {sub(/\r$/, ""); sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' "$HEADERS")"
+CODE="$(jq -rn --arg url "$LOCATION" '$url | capture("[?&]code=(?<code>[^&]+)").code // empty')"
+RETURNED_STATE="$(jq -rn --arg url "$LOCATION" '$url | capture("[?&]state=(?<state>[^&]+)").state // empty')"
+
+if [[ -z "$CODE" || "$RETURNED_STATE" != "$STATE" ]]; then
+  echo "Redirect did not contain the expected authorization code/state." >&2
+  exit 1
+fi
+
+echo "Exchanging authorization code for tokens..."
+curl --fail-with-body --silent --show-error \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -nc --arg code "$CODE" --arg client "$CLIENT_ID" \
+    --arg redirect "$REDIRECT_URI" --arg verifier "$VERIFIER" \
+    '{grant_type:"authorization_code",code:$code,client_id:$client,redirect_uri:$redirect,code_verifier:$verifier}')" \
+  "$BASE_URL/oauth/token" > "$TOKEN_FILE"
+
+jq -e '.access_token and .refresh_token' "$TOKEN_FILE" >/dev/null
+chmod 600 "$TOKEN_FILE"
+echo "OAuth complete. Tokens saved to $TOKEN_FILE (permissions restricted)."
+echo "Use the access token as: Authorization: Bearer <access_token>"
+```
+
+Run it with your gateway URL:
+
+```bash
+chmod +x oauth-curl.sh
+BASE_URL="https://your-gateway.example" ./oauth-curl.sh
+```
+
+The redirect URI is only used to receive the OAuth redirect URL; this script reads the redirect from the response headers and does not need to start a local callback server. Keep the token file private, do not commit it, and delete it when no longer needed. The refresh token can be exchanged at `/oauth/token` with `grant_type=refresh_token` and the same `client_id`.
