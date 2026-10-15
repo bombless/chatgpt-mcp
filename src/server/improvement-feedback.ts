@@ -22,7 +22,7 @@ function serialized<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 function normalized(value: string): string {
-  return value.trim().toLocaleLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();
+  return value.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 
 export async function submitImprovement(input: SubmitInput) {
@@ -38,7 +38,7 @@ export async function submitImprovement(input: SubmitInput) {
       duplicate.occurrences += 1;
       duplicate.updatedAt = now;
       duplicate.lastObservedAt = now;
-      if (input.evidence?.trim()) duplicate.evidence = [duplicate.evidence, input.evidence.trim()].filter(Boolean).join('\\n').slice(-4000);
+      if (input.evidence?.trim()) duplicate.evidence = [duplicate.evidence, input.evidence.trim()].filter(Boolean).join('\n').slice(-4000);
       if (!duplicate.relatedTool && input.relatedTool) duplicate.relatedTool = input.relatedTool;
       await saveDb(db);
       return { action: 'submitted', duplicate: true, suggestion: duplicate };
