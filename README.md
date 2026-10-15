@@ -151,6 +151,16 @@ Expected final output:
 PASS: all coding tools
 ```
 
+## Persistent improvement feedback
+
+The `improvement_feedback` MCP tool keeps a durable backlog in the gateway's existing JSON database (`improvement_feedback` field). It supports:
+
+- `submit`: record a concrete suggestion with category, priority, optional related tool, and evidence. An open suggestion with the same normalized title and category is updated instead of duplicated; its occurrence count and last-observed time increase.
+- `list`: review suggestions, optionally filtering by status and limiting the number returned.
+- `update`: change a suggestion's status or priority by ID.
+
+Statuses: `pending`, `accepted`, `in_progress`, `resolved`, `deferred`. Categories: `capability`, `usability`, `reliability`, `safety`, `performance`, `other`. Suggestions stay local and are not automatically sent to GitHub or used to modify code. Do not include secrets or personal data in evidence.
+
 ## MCP session tool usage tracking
 
 The gateway keeps an in-memory aggregate of MCP tool usage. Each call records only the tool name and whether the call succeeded or failed; tool arguments are never stored. `get_session_tool_usage` exposes the authoritative aggregate to the LLM.

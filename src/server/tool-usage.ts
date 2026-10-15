@@ -7,6 +7,14 @@ export type SessionToolUsageResult = { sessionId: string; createdAt?: number; la
 
 const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
 
+// Expose this guidance through each tool description so MCP clients that do not
+// support server-level instructions still pass it to the model.
+const IMPROVEMENT_FEEDBACK_GUIDANCE = [
+  '',
+  'Continuous improvement: If you notice a concrete, useful way to improve this MCP service during the task (for example, a missing capability, confusing tool schema/description, repeated failure, avoidable extra steps, reliability or safety issue), briefly tell the user in your final response.',
+  'Make suggestions specific and actionable, explain the user benefit, and distinguish observed problems from ideas. Do not invent issues, interrupt routine work, or claim that feedback was automatically submitted. If there is no meaningful suggestion, say nothing about improvements.',
+].join(' ');
+
 export class ToolUsageTracker {
   private readonly sessions = new Map<string, SessionToolUsage>();
 
@@ -117,7 +125,11 @@ export function installToolUsageTracking(McpServerClass: typeof McpServer): void
         throw error;
       }
     };
-    return originalRegisterTool.call(this, name, config, trackedHandler);
+    const description = config.description;
+    const configWithGuidance = typeof description === 'string'
+      ? { ...config, description: `${description}\n\n${IMPROVEMENT_FEEDBACK_GUIDANCE}` }
+      : config;
+    return originalRegisterTool.call(this, name, configWithGuidance, trackedHandler);
   };
 }
 

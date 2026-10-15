@@ -3,7 +3,23 @@ import { dirname } from 'node:path';
 
 const DB_PATH = process.env.DB_PATH ?? './chatgpt-mcp.json';
 
+export type ImprovementFeedbackEntry = {
+  id: string;
+  title: string;
+  description: string;
+  category: 'capability' | 'usability' | 'reliability' | 'safety' | 'performance' | 'other';
+  status: 'pending' | 'accepted' | 'in_progress' | 'resolved' | 'deferred';
+  priority: 'low' | 'medium' | 'high';
+  relatedTool?: string;
+  evidence?: string;
+  occurrences: number;
+  createdAt: number;
+  updatedAt: number;
+  lastObservedAt: number;
+};
+
 export type DbState = {
+  improvement_feedback: Record<string, ImprovementFeedbackEntry>;
   totp_config: { secret: string; created_at: number; updated_at: number } | null;
   oauth_clients: Record<string, { client_id: string; redirect_uris: string[]; client_name?: string | null; created_at: number }>;
   oauth_codes: Record<string, { code: string; client_id: string; redirect_uri: string; code_challenge?: string | null; expires_at: number }>;
@@ -12,6 +28,7 @@ export type DbState = {
 };
 
 const emptyDb = (): DbState => ({
+  improvement_feedback: {},
   totp_config: null,
   oauth_clients: {},
   oauth_codes: {},
@@ -34,6 +51,7 @@ async function loadDb(): Promise<DbState> {
     return {
       ...emptyDb(),
       ...parsed,
+      improvement_feedback: parsed.improvement_feedback ?? {},
       oauth_clients: parsed.oauth_clients ?? {},
       oauth_codes: parsed.oauth_codes ?? {},
       oauth_access_tokens: parsed.oauth_access_tokens ?? {},

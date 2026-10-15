@@ -14,6 +14,7 @@ import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedReso
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 import { applyNativePatch } from './native-patch.js';
+import { submitImprovement, listImprovements, updateImprovement, improvementCategories, improvementStatuses, improvementPriorities } from './improvement-feedback.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -111,6 +112,31 @@ function buildMcpServer() {
     resultContent(await registry.call(agentId, 'get_proxy_info', { intent }))
   );
   server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
+
+  server.registerTool('improvement_feedback', {
+    description: 'Collect and manage persistent suggestions for improving this MCP service. Submit concrete observed problems or actionable ideas, list the backlog, and update status/priority. Do not invent issues or include secrets or personal data.',
+    inputSchema: input({
+      action: z.enum(['submit', 'list', 'update']),
+      title: z.string().min(3).max(160).optional(),
+      description: z.string().min(5).max(4000).optional(),
+      category: z.enum(improvementCategories).optional(),
+      priority: z.enum(improvementPriorities).optional(),
+      relatedTool: z.string().max(100).optional(),
+      evidence: z.string().max(4000).optional(),
+      status: z.enum(improvementStatuses).optional(),
+      id: z.string().uuid().optional(),
+      limit: z.number().int().min(1).max(100).default(20),
+    }),
+    outputSchema: z.object({ result: z.unknown() }),
+  }, async ({ action, title, description, category, priority, relatedTool, evidence, status, id, limit }) => {
+    if (action === 'submit') {
+      if (!title || !description || !category) throw new Error('submit requires title, description, and category');
+      return resultContent(await submitImprovement({ title, description, category, priority: priority ?? 'medium', relatedTool, evidence }));
+    }
+    if (action === 'list') return resultContent(await listImprovements({ status, category, limit }));
+    if (!id || (!status && !priority)) throw new Error('update requires id and at least one of status or priority');
+    return resultContent(await updateImprovement({ id, status, priority }));
+  });
 
   server.registerTool('fetch_image_block', { description: 'Fetch an image URL and return it as an MCP image content block. Useful for testing whether the MCP client renders image blocks.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.unknown() }) }, async ({ url }) => {
     const { bytes, mimeType } = await fetchImage(url);
