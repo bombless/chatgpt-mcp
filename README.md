@@ -50,7 +50,7 @@ npm is intentionally exposed as separate, semantic tools. Use `npm_test` for `np
 
 Gradle is exposed as separate, fixed-task tools. Use `gradle_assemble_debug` for `gradle assembleDebug` and `gradle_install_debug` for `gradle installDebug`. These tools do not accept arbitrary Gradle arguments.
 
-`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, Gradle tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
+`rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools require `ALLOW_COMMAND_EXECUTION=true` or `ALLOW_NPM_EXECUTION=true` on the Windows agent. Gradle tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` still require `ALLOW_COMMAND_EXECUTION=true`.
 
 ### Browser / CDP
 
