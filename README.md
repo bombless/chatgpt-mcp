@@ -270,3 +270,10 @@ Remote command execution is powerful. Start with PowerShell disabled and add an 
 - Command allowlists and audit logging
 - Multiple Windows agents with explicit targeting
 - MCP integration/end-to-end tests
+
+### Displays and screenshots
+
+- `get_screen_info`: lists all detected displays with index, device name, resolution, virtual-desktop coordinates, and primary-display status.
+- `take_screenshot`: returns screenshots as native MCP image content blocks (not Base64 text). By default it captures each detected display separately; pass `screenIndex` from `get_screen_info` to capture one display. The result includes display metadata alongside the images.
+- Windows capture uses .NET/System.Windows.Forms. Linux requires an X11 session plus `xrandr` and ImageMagick's `import` command. Wayland-only sessions are not supported by this implementation.
+
