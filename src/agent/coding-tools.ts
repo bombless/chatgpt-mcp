@@ -311,7 +311,7 @@ async function command(name: 'npm' | 'python' | 'node', args: Record<string, unk
 async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init', args: Record<string, unknown>, logCommand?: CommandLogger) {
   const supplied = Array.isArray(args.args) ? args.args.map(String) : [];
   let commandArgs: string[];
-  switch (tool) {
+  switch (tool) {\n    case 'get_screen_info': return getScreenInfo();\n    case 'take_screenshot': return takeScreenshot(args);
     case 'npm_test':
       commandArgs = ['test', ...supplied];
       break;
@@ -437,6 +437,48 @@ async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLog
     await fs.writeFile(temp, patch, 'utf8');
     return await exec(process.platform === 'win32' ? 'git.exe' : 'git', ['apply', '--whitespace=nowarn', temp], cwd, COMMAND_TIMEOUT_MS, logCommand);
   } finally { await fs.rm(temp, { force: true }); }
+}
+
+async function getScreenInfo() {
+  if (process.platform === 'win32') {
+    const script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $b=$_.Bounds; [PSCustomObject]@{ deviceName=$_.DeviceName; x=$b.X; y=$b.Y; width=$b.Width; height=$b.Height; primary=$_.Primary } } | ConvertTo-Json -Compress";
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+    const parsed = JSON.parse(stdout.trim() || '[]');
+    const screens = (Array.isArray(parsed) ? parsed : [parsed]).map((s: any, index: number) => ({ index, deviceName: String(s.deviceName), x: Number(s.x), y: Number(s.y), width: Number(s.width), height: Number(s.height), primary: Boolean(s.primary) }));
+    return { platform: process.platform, screens };
+  }
+  if (process.platform === 'linux') {
+    const { stdout } = await execFileAsync('xrandr', ['--listmonitors'], { timeout: 10000, maxBuffer: MAX_OUTPUT_BYTES });
+    const screens = stdout.split(/\\r?\\n/u).slice(1).filter(Boolean).map((line, index) => {
+      const m = line.match(/(?:\\*?)(\\d+)\\/(?:\\d+)x(\\d+)\\/(?:\\d+)\\+(-?\\d+)\\+(-?\\d+)/u);
+      if (!m) return null;
+      return { index, deviceName: line.trim().split(/\\s+/u).slice(2).join(' '), x: Number(m[3]), y: Number(m[4]), width: Number(m[1]), height: Number(m[2]), primary: line.includes('*') };
+    }).filter(Boolean);
+    return { platform: process.platform, screens };
+  }
+  throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
+}
+
+async function takeScreenshot(args: Record<string, unknown>) {
+  const info = await getScreenInfo();
+  const wanted = args.screenIndex === undefined ? info.screens : info.screens.filter(s => s.index === Number(args.screenIndex));
+  if (!wanted.length) throw new Error(`No display found for screenIndex=${String(args.screenIndex)}`);
+  const screens = [];
+  for (const screen of wanted) {
+    let data: string;
+    let mimeType = 'image/png';
+    if (process.platform === 'win32') {
+      const script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::AllScreens[" + screen.index + "]; $b=$s.Bounds; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); try { $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $ms=New-Object System.IO.MemoryStream; try { $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) } finally { $ms.Dispose() } } finally { $g.Dispose(); $bmp.Dispose() }";
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) });
+      data = stdout.trim();
+    } else if (process.platform === 'linux') {
+      const { stdout } = await execFileAsync('import', ['-window', 'root', 'png:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
+      data = Buffer.from(stdout).toString('base64');
+    } else throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
+    if (!data) throw new Error(`Screenshot capture returned no image data for display ${screen.index}`);
+    screens.push({ ...screen, mimeType, data });
+  }
+  return { screens };
 }
 
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
