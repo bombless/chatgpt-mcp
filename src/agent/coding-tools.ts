@@ -450,9 +450,9 @@ async function getScreenInfo() {
   if (process.platform === 'linux') {
     const { stdout } = await execFileAsync('xrandr', ['--listmonitors'], { timeout: 10000, maxBuffer: MAX_OUTPUT_BYTES });
     const screens = stdout.split(/\r?\n/u).slice(1).filter(Boolean).map((line, index) => {
-      const m = line.match(/(?:\\*?)(\d+)\/(?:\d+)x(\d+)\/(?:\d+)\+(-?\d+)\+(-?\d+)/u);
+      const m = line.match(/(\d+)\/\d+x(\d+)\/\d+\+(-?\d+)\+(-?\d+)/u);
       if (!m) return null;
-      return { index, deviceName: line.trim().split(/\s+/u).slice(1).join(' ').replace(/^\+?\*?/u, ''), x: Number(m[5]), y: Number(m[6]), width: Number(m[1]), height: Number(m[3]), primary: line.includes('*') };
+      return { index, deviceName: line.trim().split(/\s+/u).slice(1).join(' ').replace(/^\+?\*?/u, ''), x: Number(m[3]), y: Number(m[4]), width: Number(m[1]), height: Number(m[2]), primary: line.includes('*') };
     }).filter(Boolean);
     return { platform: process.platform, screens };
   }
