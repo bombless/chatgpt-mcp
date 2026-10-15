@@ -33,7 +33,7 @@ function safeAuthInfo(req: express.Request) { const authorization = req.header('
 class AgentRegistry {
   private readonly agents = new Map<string, WebSocket>();
   private readonly lastPongAt = new WeakMap<WebSocket, number>();
-  private readonly pending = new Map<string, { agentId: string; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private readonly pending = new Map<string, { agentId: string; socket: WebSocket; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   add(agentId: string, socket: WebSocket) {
     const old = this.agents.get(agentId);
     if (old && old !== socket) old.close(4000, 'replaced by a newer connection');
@@ -43,7 +43,7 @@ class AgentRegistry {
     socket.on('close', () => {
       if (this.agents.get(agentId) === socket) this.agents.delete(agentId);
       for (const [id, item] of this.pending) {
-        if (item.agentId !== agentId) continue;
+        if (item.socket !== socket) continue;
         this.pending.delete(id);
         item.reject(new Error(`Agent '${agentId}' disconnected while request was pending`));
       }
@@ -82,6 +82,7 @@ class AgentRegistry {
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, {
         agentId,
+        socket,
         resolve: value => { clearTimeout(timer); mcpDebug('agent-call:success', { requestId: id, agentId, tool }); resolve(value); },
         reject: error => { clearTimeout(timer); mcpDebug('agent-call:error', { requestId: id, agentId, tool, error: error.message }); reject(error); }
       });
