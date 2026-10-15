@@ -472,7 +472,7 @@ async function takeScreenshot(args: Record<string, unknown>) {
       const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) });
       data = stdout.trim();
     } else if (process.platform === 'linux') {
-      const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${Math.max(0, screen.x)}+${Math.max(0, screen.y)}`, '+repage', 'png:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
+      const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${screen.x - Math.min(...info.screens.map(s => s.x))}+${screen.y - Math.min(...info.screens.map(s => s.y))}`, '+repage', 'png:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
       data = Buffer.from(stdout).toString('base64');
     } else throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
     if (!data) throw new Error(`Screenshot capture returned no image data for display ${screen.index}`);
