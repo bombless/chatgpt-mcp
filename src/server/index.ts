@@ -121,11 +121,11 @@ function buildMcpServer() {
   }, z.object({ result: z.object({ screenIndex: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), absoluteX: z.number().int(), absoluteY: z.number().int(), r: z.number().int().min(0).max(255), g: z.number().int().min(0).max(255), b: z.number().int().min(0).max(255), hex: z.string(), format: z.string(), note: z.string() }) }));
   
   server.registerTool('take_screenshot', {
-    description: 'Capture screenshots as real MCP image blocks. Each image is a JPEG limited to at most 1000x1000 pixels, with payload integrity verified before return. By default captures all attached monitors individually; optionally pass screenIndex from get_screen_info.',
-    inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional() }),
-  }, async ({ agentId, screenIndex, intent }) => {
+    description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Call get_screen_info for display indices and bounds.',
+    inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional(), x: z.number().int().min(0).optional(), y: z.number().int().min(0).optional(), width: z.number().int().min(1).optional(), height: z.number().int().min(1).optional() }),
+  }, async ({ agentId, screenIndex, x, y, width, height, intent }) => {
     try {
-    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }> };
+    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }> };
     if (!captured || !Array.isArray(captured.screens) || captured.screens.length === 0) throw new Error('Agent returned an invalid or empty screenshot response');
     if (captured.screens.some(screen => !screen.data || !/^image\/(png|jpeg|webp)$/u.test(screen.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(screen.data))) {
       throw new Error('Agent returned invalid screenshot image data');
