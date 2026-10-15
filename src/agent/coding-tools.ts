@@ -439,8 +439,65 @@ async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLog
   } finally { await fs.rm(temp, { force: true }); }
 }
 
+async function getScreenInfo() {
+  if (process.platform === 'win32') {
+    const script = "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class DpiAwareness { [DllImport(\"shcore.dll\")] public static extern int SetProcessDpiAwareness(int awareness); }'; try { [void][DpiAwareness]::SetProcessDpiAwareness(2) } catch {}; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $b=$_.Bounds; [PSCustomObject]@{ deviceName=$_.DeviceName; x=$b.X; y=$b.Y; width=$b.Width; height=$b.Height; primary=$_.Primary } } | ConvertTo-Json -Compress";
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+    const parsed = JSON.parse(stdout.trim() || '[]');
+    const screens = (Array.isArray(parsed) ? parsed : [parsed]).map((s: any, index: number) => ({ index, deviceName: String(s.deviceName), x: Number(s.x), y: Number(s.y), width: Number(s.width), height: Number(s.height), primary: Boolean(s.primary) }));
+    return { platform: process.platform, screens };
+  }
+  if (process.platform === 'linux') {
+    const { stdout } = await execFileAsync('xrandr', ['--listmonitors'], { timeout: 10000, maxBuffer: MAX_OUTPUT_BYTES });
+    const screens = stdout.split(/\r?\n/u).slice(1).filter(Boolean).map((line, index) => {
+      const m = line.match(/(\d+)\/\d+x(\d+)\/\d+\+(-?\d+)\+(-?\d+)/u);
+      if (!m) return null;
+      return { index, deviceName: line.trim().split(/\s+/u).slice(1).join(' ').replace(/^\+?\*?/u, ''), x: Number(m[3]), y: Number(m[4]), width: Number(m[1]), height: Number(m[2]), primary: line.includes('*') };
+    }).filter((s): s is NonNullable<typeof s> => s !== null);
+    return { platform: process.platform, screens };
+  }
+  throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
+}
+
+async function takeScreenshot(args: Record<string, unknown>) {
+  const info = await getScreenInfo();
+  const wanted = args.screenIndex === undefined ? info.screens : info.screens.filter(s => s.index === Number(args.screenIndex));
+  if (!wanted.length) throw new Error(`No display found for screenIndex=${String(args.screenIndex)}`);
+  const screens = [];
+  for (const screen of wanted) {
+    let data: string;
+    const mimeType = 'image/jpeg';
+    if (process.platform === 'win32') {
+      const scriptPath = path.resolve(process.cwd(), 'scripts', 'test-screenshot-jpeg.ps1');
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
+        '-X', String(screen.x), '-Y', String(screen.y),
+        '-CaptureWidth', String(screen.width), '-CaptureHeight', String(screen.height),
+      ], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 100_000_000) });
+      const match = stdout.match(/^SCREENSHOT_BASE64:([A-Za-z0-9+/]+={0,2})$/mu);
+      if (!match) throw new Error('PowerShell screenshot script did not return a valid Base64 payload');
+      data = match[1];
+    } else if (process.platform === 'linux') {
+      const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${screen.x - Math.min(...info.screens.map(s => s.x))}+${screen.y - Math.min(...info.screens.map(s => s.y))}`, '+repage', '-resize', '1000x1000>', '-quality', '82', 'jpeg:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
+      data = Buffer.from(stdout).toString('base64');
+    } else throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
+    if (!data || !/^[A-Za-z0-9+/]+={0,2}$/u.test(data)) throw new Error(`Screenshot capture returned invalid JPEG base64 for display ${screen.index}`);
+    const imageBytes = Buffer.from(data, 'base64');
+    if (imageBytes.length < 4 || imageBytes[0] !== 0xff || imageBytes[1] !== 0xd8 || imageBytes[imageBytes.length - 2] !== 0xff || imageBytes[imageBytes.length - 1] !== 0xd9) throw new Error(`Screenshot JPEG integrity check failed for display ${screen.index}; base64Chars=${data.length}, bytes=${imageBytes.length}`);
+    const scale = Math.min(1, 1000 / screen.width, 1000 / screen.height);
+    const width = Math.max(1, Math.round(screen.width * scale));
+    const height = Math.max(1, Math.round(screen.height * scale));
+    const dataSha256 = crypto.createHash('sha256').update(imageBytes).digest('hex');
+    console.log(`[agent][screenshot] captured display=${screen.index} size=${width}x${height} mimeType=${mimeType} base64Chars=${data.length} bytes=${imageBytes.length} sha256=${dataSha256}`);
+    screens.push({ ...screen, width, height, mimeType, data, dataBytes: imageBytes.length, dataSha256 });
+  }
+  return { screens };
+}
+
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
+    case 'get_screen_info': return getScreenInfo();
+    case 'take_screenshot': return takeScreenshot(args);
     case 'npm_test': return runNpmTool('npm_test', args, logCommand);
     case 'npm_run': return runNpmTool('npm_run', args, logCommand);
     case 'npm_install': return runNpmTool('npm_install', args, logCommand);

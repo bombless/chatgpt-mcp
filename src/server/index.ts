@@ -14,6 +14,7 @@ import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedReso
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 import { applyNativePatch } from './native-patch.js';
+import { listImprovementSuggestions, submitImprovementSuggestion, updateImprovementSuggestion, suggestionCategories, suggestionPriorities, suggestionStatuses } from './improvement-suggestions.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,6 +36,11 @@ class AgentRegistry {
   add(agentId: string, socket: WebSocket) { const old = this.agents.get(agentId); old?.close(4000, 'replaced by a newer connection'); this.agents.set(agentId, socket); socket.on('close', () => { if (this.agents.get(agentId) === socket) this.agents.delete(agentId); }); }
   get(agentId: string) { const socket = this.agents.get(agentId); return socket?.readyState === WebSocket.OPEN ? socket : undefined; }
   list() { return [...this.agents.keys()]; }
+  notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }) {
+    const socket = this.get(agentId);
+    if (!socket) { mcpDebug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }
+    try { socket.send(JSON.stringify(message)); return true; } catch (error) { mcpDebug('agent-diagnostic:send-error', { agentId, tool: message.tool, error: String(error) }); return false; }
+  }
   async call(agentId: string, tool: ToolName, args: Record<string, unknown>) {
     const socket = this.get(agentId);
     if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Windows agent '${agentId}' is not connected`); }
@@ -61,20 +67,6 @@ function bearer(req: express.Request) { const value = req.header('authorization'
 async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
 function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
-async function fetchImage(url: string) {
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`Image fetch failed: HTTP ${response.status}`);
-  const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-  if (!contentType.startsWith('image/')) throw new Error(`URL did not return an image (content-type: ${contentType || 'unknown'})`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length === 0) throw new Error('Image response was empty');
-  return { bytes, mimeType: contentType };
-}
-
-function normalizeImageMimeType(mimeType: string) {
-  return mimeType.toLowerCase().split(';', 1)[0]?.trim() || 'image/png';
-}
-
 function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
@@ -94,6 +86,9 @@ function buildMcpServer() {
       resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
 
   server.registerTool('list_agents', { description: 'List connected agents.', inputSchema: z.object({ intent: intentSchema }), outputSchema: z.object({ result: z.array(z.string()) }) }, async () => resultContent(registry.list()));
+  server.registerTool('submit_improvement_suggestion', { description: 'Persist a concrete suggestion for improving this MCP service. Use when actual usage reveals recurring friction, missing capabilities, unclear tool behavior, reliability/performance/usability/security issues, or a valuable enhancement. Include observed context and expected benefit; do not submit generic or speculative suggestions. This records feedback only and does not modify the server.', inputSchema: input({ title: z.string().trim().min(5).max(160), description: z.string().trim().min(10).max(4000), category: z.enum(suggestionCategories), priority: z.enum(suggestionPriorities).default('medium'), source: z.string().trim().max(500).optional() }), outputSchema: z.object({ result: z.object({ suggestion: z.object({ id: z.string(), title: z.string(), status: z.string(), occurrences: z.number().int() }), deduplicated: z.boolean() }) }) }, async ({ title, description, category, priority, source }) => { const result = await submitImprovementSuggestion({ title, description, category, priority, source }); return resultContent({ suggestion: { id: result.suggestion.id, title: result.suggestion.title, status: result.suggestion.status, occurrences: result.suggestion.occurrences }, deduplicated: result.deduplicated }); });
+  server.registerTool('list_improvement_suggestions', { description: 'List persisted MCP improvement suggestions. Filter by status/category to review the backlog and identify recurring priorities.', inputSchema: input({ status: z.enum(suggestionStatuses).optional(), category: z.enum(suggestionCategories).optional(), limit: z.number().int().min(1).max(200).default(50) }), outputSchema: z.object({ result: z.array(z.object({ id: z.string(), title: z.string(), description: z.string(), category: z.string(), priority: z.string(), status: z.string(), created_at: z.number(), updated_at: z.number(), occurrences: z.number().int() })) }) }, async ({ status, category, limit }) => resultContent(await listImprovementSuggestions({ status, category, limit })));
+  server.registerTool('update_improvement_suggestion', { description: 'Update the workflow status of a persisted MCP improvement suggestion. Use only when the user requests backlog maintenance or a status change; this does not implement the suggestion itself.', inputSchema: input({ id: z.string().uuid(), status: z.enum(suggestionStatuses), note: z.string().trim().max(1000).optional() }), outputSchema: z.object({ result: z.object({ id: z.string(), title: z.string(), status: z.string(), updated_at: z.number() }) }) }, async ({ id, status, note }) => { const result = await updateImprovementSuggestion({ id, status, note }); return resultContent({ id: result.id, title: result.title, status: result.status, updated_at: result.updated_at }); });
   server.registerTool('read_file', { description: 'Read a UTF-8 text file in the agent workspace.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.string() }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'read_file', { path, intent })));
   server.registerTool('write_file', { description: 'Write UTF-8 text to a file in the agent workspace. Parent directories must already exist.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), content: z.string() }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string() }) }) }, async ({ agentId, path, content, intent }) => resultContent(await registry.call(agentId, 'write_file', { path, content, intent })));
   server.registerTool('edit_file', { description: 'Replace exact text in a UTF-8 file. Fails unless oldText occurs exactly expectedReplacements times (default 1). Optionally verifies expectedSha256 before editing and returns a diff plus before/after hashes.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), oldText: z.string().min(1), newText: z.string(), expectedReplacements: z.number().int().min(1).default(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional() }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), changed: z.literal(true), replacements: z.number().int(), bytesBefore: z.number().int(), bytesAfter: z.number().int(), sha256Before: z.string(), sha256After: z.string(), diff: z.string() }) }) }, async ({ agentId, path, oldText, newText, expectedReplacements, expectedSha256, intent }) => resultContent(await registry.call(agentId, 'edit_file', { path, oldText, newText, expectedReplacements, expectedSha256, intent })));
@@ -112,18 +107,45 @@ function buildMcpServer() {
   );
   server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
 
-  server.registerTool('fetch_image_block', { description: 'Fetch an image URL and return it as an MCP image content block. Useful for testing whether the MCP client renders image blocks.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.unknown() }) }, async ({ url }) => {
-    const { bytes, mimeType } = await fetchImage(url);
-    const content = [{ type: 'image' as const, data: bytes.toString('base64'), mimeType: normalizeImageMimeType(mimeType) }];
-    return { content, structuredContent: { result: content } };
-  });
+  server.registerTool('get_screen_info', {
+    description: 'List every attached display/monitor, including stable index, device name, bounds, resolution, primary status, and virtual desktop coordinates.',
+    inputSchema: input({ agentId: agentIdSchema }),
+    outputSchema: z.object({ result: z.object({ platform: z.string(), screens: z.array(z.object({ index: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), width: z.number().int(), height: z.number().int(), primary: z.boolean() })) }) }),
+  }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_screen_info', { intent })));
 
-  server.registerTool('fetch_image_base64', { description: 'Fetch an image URL and return its Base64-encoded bytes as text.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ mimeType: z.string(), base64: z.string() }) }) }, async ({ url }) => {
-    const { bytes, mimeType } = await fetchImage(url);
-    return resultContent({ mimeType: normalizeImageMimeType(mimeType), base64: bytes.toString('base64') });
+  server.registerTool('take_screenshot', {
+    description: 'Capture screenshots as real MCP image blocks. Each image is a JPEG limited to at most 1000x1000 pixels, with payload integrity verified before return. By default captures all attached monitors individually; optionally pass screenIndex from get_screen_info.',
+    inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional() }),
+  }, async ({ agentId, screenIndex, intent }) => {
+    try {
+    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }> };
+    if (!captured || !Array.isArray(captured.screens) || captured.screens.length === 0) throw new Error('Agent returned an invalid or empty screenshot response');
+    if (captured.screens.some(screen => !screen.data || !/^image\/(png|jpeg|webp)$/u.test(screen.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(screen.data))) {
+      throw new Error('Agent returned invalid screenshot image data');
+    }
+    for (const screen of captured.screens) {
+      if (screen.mimeType !== 'image/jpeg' || screen.width > 1000 || screen.height > 1000 || screen.width < 1 || screen.height < 1) throw new Error(`Screenshot metadata violates JPEG/1000x1000 constraints for display ${screen.index}`);
+      const bytes = Buffer.from(screen.data, 'base64');
+      if (bytes.length !== screen.dataBytes) throw new Error(`Screenshot byte length mismatch for display ${screen.index}: expected=${screen.dataBytes}, received=${bytes.length}`);
+      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) throw new Error(`Screenshot JPEG integrity check failed for display ${screen.index}`);
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== screen.dataSha256) throw new Error(`Screenshot SHA-256 mismatch for display ${screen.index}`);
+      mcpDebug('screenshot:integrity-ok', { agentId, screenIndex: screen.index, width: screen.width, height: screen.height, bytes: bytes.length, sha256: digest });
+    }
+    const content = [
+      { type: 'text' as const, text: JSON.stringify({ count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) }, null, 2) },
+      ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
+    ];
+    // Do not return structuredContent for screenshots: clients may prioritize it
+    // over content and consequently discard the actual MCP image blocks.
+    return { content };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const notified = registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'take_screenshot', message });
+      console.error(`[mcp][screenshot][error] agentId=${agentId} notifiedAgent=${notified}: ${message}`);
+      throw new Error(`take_screenshot failed: ${message}`);
+    }
   });
-
-  server.registerTool('fetch_image_url', { description: 'Return the supplied image URL unchanged. Useful for testing whether ChatGPT can display an image from a URL.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ url: z.string().url() }) }) }, async ({ url }) => resultContent({ url }));
 
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
   npmTool('npm_run', 'Run one named npm script with `npm run <script>`. Extra arguments are passed to that script after `--`.', ({ args }) => { const values = Array.isArray(args) ? args.map(String) : []; const script = values.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); return ['run', script, ...(values.length ? ['--', ...values] : [])]; });

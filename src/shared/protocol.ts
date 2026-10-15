@@ -13,6 +13,14 @@ export type AgentResponse = {
   error?: string;
 };
 
+export type ServerDiagnostic = {
+  type: 'server_diagnostic';
+  level: 'error' | 'warning';
+  tool: string;
+  message: string;
+  requestId?: string;
+};
+
 export type AgentHello = {
   type: 'hello';
   agentId: string;
@@ -33,6 +41,8 @@ export type ToolName =
   | 'execute_powershell'
   | 'execute_bash'
   | 'get_system_info'
+  | 'get_screen_info'
+  | 'take_screenshot'
   | 'npm_test'
   | 'npm_run'
   | 'npm_install'
