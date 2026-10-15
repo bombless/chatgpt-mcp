@@ -441,7 +441,7 @@ async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLog
 
 async function getScreenInfo() {
   if (process.platform === 'win32') {
-    const script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $b=$_.Bounds; [PSCustomObject]@{ deviceName=$_.DeviceName; x=$b.X; y=$b.Y; width=$b.Width; height=$b.Height; primary=$_.Primary } } | ConvertTo-Json -Compress";
+    const script = "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class DpiAwareness { [DllImport(\"shcore.dll\")] public static extern int SetProcessDpiAwareness(int awareness); }'; try { [void][DpiAwareness]::SetProcessDpiAwareness(2) } catch {}; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $b=$_.Bounds; [PSCustomObject]@{ deviceName=$_.DeviceName; x=$b.X; y=$b.Y; width=$b.Width; height=$b.Height; primary=$_.Primary } } | ConvertTo-Json -Compress";
     const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
     const parsed = JSON.parse(stdout.trim() || '[]');
     const screens = (Array.isArray(parsed) ? parsed : [parsed]).map((s: any, index: number) => ({ index, deviceName: String(s.deviceName), x: Number(s.x), y: Number(s.y), width: Number(s.width), height: Number(s.height), primary: Boolean(s.primary) }));
@@ -468,7 +468,7 @@ async function takeScreenshot(args: Record<string, unknown>) {
     let data: string;
     let mimeType = 'image/png';
     if (process.platform === 'win32') {
-      const script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::AllScreens[" + screen.index + "]; $b=$s.Bounds; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); try { $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $ms=New-Object System.IO.MemoryStream; try { $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) } finally { $ms.Dispose() } } finally { $g.Dispose(); $bmp.Dispose() }";
+      const script = "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class DpiAwareness { [DllImport(\"shcore.dll\")] public static extern int SetProcessDpiAwareness(int awareness); }'; try { [void][DpiAwareness]::SetProcessDpiAwareness(2) } catch {}; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::AllScreens[" + screen.index + "]; $b=$s.Bounds; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); try { $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $ms=New-Object System.IO.MemoryStream; try { $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) } finally { $ms.Dispose() } } finally { $g.Dispose(); $bmp.Dispose() }";
       const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) });
       data = stdout.trim();
     } else if (process.platform === 'linux') {
