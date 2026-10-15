@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createServer, request as httpRequest } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/server';
 import { installToolUsageTracking, startToolUsageCleanup } from './tool-usage.js';
