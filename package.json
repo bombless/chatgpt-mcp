@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/server/launcher.js",
     "dev": "tsx src/server/launcher.ts",
-    "agent": "node scripts/ensure-screenshot-deps.mjs && tsx src/agent/index.ts",
+    "agent": "tsx src/agent/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:coding": "tsx tests/coding-tools.test.ts",
     "test:tool-usage": "tsx --test tests/tool-usage.test.ts",

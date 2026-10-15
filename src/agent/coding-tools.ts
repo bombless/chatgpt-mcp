@@ -468,9 +468,15 @@ async function takeScreenshot(args: Record<string, unknown>) {
     let data: string;
     const mimeType = 'image/jpeg';
     if (process.platform === 'win32') {
-      const script = "import base64,io,sys; from PIL import Image,ImageGrab; x,y,w,h=map(int,sys.argv[1:5]); im=ImageGrab.grab(bbox=(x,y,x+w,y+h),all_screens=True); im.thumbnail((1000,1000),Image.Resampling.LANCZOS); out=io.BytesIO(); im.convert('RGB').save(out,format='JPEG',quality=82); print(base64.b64encode(out.getvalue()).decode('ascii'))";
-      const { stdout } = await execFileAsync('python.exe', ['-c', script, String(screen.x), String(screen.y), String(screen.width), String(screen.height)], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 100_000_000) });
-      data = stdout.trim().replace(/^data:image\/png;base64,/u, '');
+      const scriptPath = path.resolve(process.cwd(), 'scripts', 'test-screenshot-jpeg.ps1');
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
+        '-X', String(screen.x), '-Y', String(screen.y),
+        '-CaptureWidth', String(screen.width), '-CaptureHeight', String(screen.height),
+      ], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 100_000_000) });
+      const match = stdout.match(/^SCREENSHOT_BASE64:([A-Za-z0-9+/]+={0,2})$/mu);
+      if (!match) throw new Error('PowerShell screenshot script did not return a valid Base64 payload');
+      data = match[1];
     } else if (process.platform === 'linux') {
       const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${screen.x - Math.min(...info.screens.map(s => s.x))}+${screen.y - Math.min(...info.screens.map(s => s.y))}`, '+repage', '-resize', '1000x1000>', '-quality', '82', 'jpeg:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
       data = Buffer.from(stdout).toString('base64');
