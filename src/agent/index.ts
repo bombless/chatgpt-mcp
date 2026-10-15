@@ -20,9 +20,9 @@ async function getConfig () {
   }
 
   return {
-    serverUrl: await get('SERVER_URL', 'ws://127.0.0.1:8787/agent'),
+    serverUrl: process.env.SERVER_URL || (await get('SERVER_URL')) || 'ws://127.0.0.1:8787/agent',
     agentToken: await get('AGENT_TOKEN'),
-    agentId: await get('AGENT_ID', os.hostname()),
+    agentId: process.env.AGENT_ID || (await get('AGENT_ID')) || os.hostname(),
     allowCommandExecution: await get('ALLOW_COMMAND_EXECUTION')
   }
 }
@@ -189,6 +189,11 @@ getConfig().then(config => {
         console.error('[agent] invalid JSON request')
         return
       }
+      if ((request as any).type === 'server_diagnostic') {
+        const diagnostic = request as any
+        console.error(`[agent][server][${diagnostic.level ?? 'error'}] tool=${diagnostic.tool ?? 'unknown'}${diagnostic.requestId ? ` requestId=${diagnostic.requestId}` : ''}: ${diagnostic.message ?? 'unspecified server diagnostic'}`)
+        return
+      }
       if (request.type !== 'request' || !request.id || !request.tool) return
       const intent =
         typeof request.args?.intent === 'string'
@@ -201,6 +206,7 @@ getConfig().then(config => {
         .getMinutes()
         .toString()
         .padStart(2, '0')}`
+      console.log(`[agent][${time}] tool=${request.tool} requestId=${request.id} started`)
       if (intent) console.log(`[agent][${time}] intent: ${intent}`)
       else
         console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`)
@@ -214,8 +220,13 @@ getConfig().then(config => {
         response.ok = true
       } catch (error) {
         response.error = error instanceof Error ? error.message : String(error)
+        console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: ${response.error}`)
       }
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(response))
+      if (ws.readyState === WebSocket.OPEN) {
+        const serialized = JSON.stringify(response)
+        console.log(`[agent][${time}] tool=${request.tool} requestId=${request.id} response=${response.ok ? 'ok' : 'error'} payloadBytes=${Buffer.byteLength(serialized, 'utf8')}`)
+        ws.send(serialized)
+      } else console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: WebSocket is not open; response could not be delivered`)
     })
     ws.on('close', () => {
       console.log('[agent] disconnected; reconnecting in 3s')

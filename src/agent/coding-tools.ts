@@ -466,17 +466,24 @@ async function takeScreenshot(args: Record<string, unknown>) {
   const screens = [];
   for (const screen of wanted) {
     let data: string;
-    let mimeType = 'image/png';
+    const mimeType = 'image/jpeg';
     if (process.platform === 'win32') {
-      const script = "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class DpiAwareness { [DllImport(\"shcore.dll\")] public static extern int SetProcessDpiAwareness(int awareness); }'; try { [void][DpiAwareness]::SetProcessDpiAwareness(2) } catch {}; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::AllScreens[" + screen.index + "]; $b=$s.Bounds; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); try { $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $ms=New-Object System.IO.MemoryStream; try { $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray()) } finally { $ms.Dispose() } } finally { $g.Dispose(); $bmp.Dispose() }";
-      const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) });
-      data = stdout.trim();
+      const script = "$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class DpiAwareness { [DllImport(\"shcore.dll\")] public static extern int SetProcessDpiAwareness(int awareness); }'; try { [void][DpiAwareness]::SetProcessDpiAwareness(2) } catch {}; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::AllScreens[" + screen.index + "]; $b=$s.Bounds; $bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); try { $g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size); $scale=[Math]::Min(1.0,[Math]::Min(1000.0/$bmp.Width,1000.0/$bmp.Height)); $w=[Math]::Max(1,[int][Math]::Round($bmp.Width*$scale)); $h=[Math]::Max(1,[int][Math]::Round($bmp.Height*$scale)); $dst=New-Object System.Drawing.Bitmap($w,$h); $dg=[System.Drawing.Graphics]::FromImage($dst); try { $dg.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $dg.DrawImage($bmp,0,0,$w,$h); $ms=New-Object System.IO.MemoryStream; try { $codec=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1; $ep=New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[long]82); $dst.Save($ms,$codec,$ep); [Convert]::ToBase64String($ms.ToArray()) } finally { $ms.Dispose(); if($ep){$ep.Dispose()} } } finally { $dg.Dispose(); $dst.Dispose() } } finally { $g.Dispose(); $bmp.Dispose() }";
+      const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 100_000_000) });
+      data = stdout.trim().replace(/^data:image\/png;base64,/u, '');
     } else if (process.platform === 'linux') {
-      const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${screen.x - Math.min(...info.screens.map(s => s.x))}+${screen.y - Math.min(...info.screens.map(s => s.y))}`, '+repage', 'png:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
+      const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${screen.x - Math.min(...info.screens.map(s => s.x))}+${screen.y - Math.min(...info.screens.map(s => s.y))}`, '+repage', '-resize', '1000x1000>', '-quality', '82', 'jpeg:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
       data = Buffer.from(stdout).toString('base64');
     } else throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
-    if (!data) throw new Error(`Screenshot capture returned no image data for display ${screen.index}`);
-    screens.push({ ...screen, mimeType, data });
+    if (!data || !/^[A-Za-z0-9+/]+={0,2}$/u.test(data)) throw new Error(`Screenshot capture returned invalid JPEG base64 for display ${screen.index}`);
+    const imageBytes = Buffer.from(data, 'base64');
+    if (imageBytes.length < 4 || imageBytes[0] !== 0xff || imageBytes[1] !== 0xd8 || imageBytes[imageBytes.length - 2] !== 0xff || imageBytes[imageBytes.length - 1] !== 0xd9) throw new Error(`Screenshot JPEG integrity check failed for display ${screen.index}; base64Chars=${data.length}, bytes=${imageBytes.length}`);
+    const scale = Math.min(1, 1000 / screen.width, 1000 / screen.height);
+    const width = Math.max(1, Math.round(screen.width * scale));
+    const height = Math.max(1, Math.round(screen.height * scale));
+    const dataSha256 = crypto.createHash('sha256').update(imageBytes).digest('hex');
+    console.log(`[agent][screenshot] captured display=${screen.index} size=${width}x${height} mimeType=${mimeType} base64Chars=${data.length} bytes=${imageBytes.length} sha256=${dataSha256}`);
+    screens.push({ ...screen, width, height, mimeType, data, dataBytes: imageBytes.length, dataSha256 });
   }
   return { screens };
 }

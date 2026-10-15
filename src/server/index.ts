@@ -35,6 +35,11 @@ class AgentRegistry {
   add(agentId: string, socket: WebSocket) { const old = this.agents.get(agentId); old?.close(4000, 'replaced by a newer connection'); this.agents.set(agentId, socket); socket.on('close', () => { if (this.agents.get(agentId) === socket) this.agents.delete(agentId); }); }
   get(agentId: string) { const socket = this.agents.get(agentId); return socket?.readyState === WebSocket.OPEN ? socket : undefined; }
   list() { return [...this.agents.keys()]; }
+  notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }) {
+    const socket = this.get(agentId);
+    if (!socket) { mcpDebug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }
+    try { socket.send(JSON.stringify(message)); return true; } catch (error) { mcpDebug('agent-diagnostic:send-error', { agentId, tool: message.tool, error: String(error) }); return false; }
+  }
   async call(agentId: string, tool: ToolName, args: Record<string, unknown>) {
     const socket = this.get(agentId);
     if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Windows agent '${agentId}' is not connected`); }
@@ -105,17 +110,37 @@ function buildMcpServer() {
   }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_screen_info', { intent })));
 
   server.registerTool('take_screenshot', {
-    description: 'Capture a screenshot as a real MCP image block. By default captures all attached monitors individually; optionally pass screenIndex from get_screen_info to capture one monitor. Multi-monitor captures include one image block per monitor and metadata text.',
+    description: 'Capture screenshots as real MCP image blocks. Each image is a JPEG limited to at most 1000x1000 pixels, with payload integrity verified before return. By default captures all attached monitors individually; optionally pass screenIndex from get_screen_info.',
     inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional() }),
-    outputSchema: z.object({ result: z.unknown() }),
   }, async ({ agentId, screenIndex, intent }) => {
-    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; x: number; y: number; primary: boolean }> };
-    if (!captured || !Array.isArray(captured.screens)) throw new Error('Agent returned an invalid screenshot response');
+    try {
+    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }> };
+    if (!captured || !Array.isArray(captured.screens) || captured.screens.length === 0) throw new Error('Agent returned an invalid or empty screenshot response');
+    if (captured.screens.some(screen => !screen.data || !/^image\/(png|jpeg|webp)$/u.test(screen.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(screen.data))) {
+      throw new Error('Agent returned invalid screenshot image data');
+    }
+    for (const screen of captured.screens) {
+      if (screen.mimeType !== 'image/jpeg' || screen.width > 1000 || screen.height > 1000 || screen.width < 1 || screen.height < 1) throw new Error(`Screenshot metadata violates JPEG/1000x1000 constraints for display ${screen.index}`);
+      const bytes = Buffer.from(screen.data, 'base64');
+      if (bytes.length !== screen.dataBytes) throw new Error(`Screenshot byte length mismatch for display ${screen.index}: expected=${screen.dataBytes}, received=${bytes.length}`);
+      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) throw new Error(`Screenshot JPEG integrity check failed for display ${screen.index}`);
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== screen.dataSha256) throw new Error(`Screenshot SHA-256 mismatch for display ${screen.index}`);
+      mcpDebug('screenshot:integrity-ok', { agentId, screenIndex: screen.index, width: screen.width, height: screen.height, bytes: bytes.length, sha256: digest });
+    }
     const content = [
       { type: 'text' as const, text: JSON.stringify({ count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) }, null, 2) },
       ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
     ];
-    return { content, structuredContent: { result: { count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) } } };
+    // Do not return structuredContent for screenshots: clients may prioritize it
+    // over content and consequently discard the actual MCP image blocks.
+    return { content };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const notified = registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'take_screenshot', message });
+      console.error(`[mcp][screenshot][error] agentId=${agentId} notifiedAgent=${notified}: ${message}`);
+      throw new Error(`take_screenshot failed: ${message}`);
+    }
   });
 
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
