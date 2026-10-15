@@ -61,20 +61,6 @@ function bearer(req: express.Request) { const value = req.header('authorization'
 async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
 function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
-async function fetchImage(url: string) {
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`Image fetch failed: HTTP ${response.status}`);
-  const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-  if (!contentType.startsWith('image/')) throw new Error(`URL did not return an image (content-type: ${contentType || 'unknown'})`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length === 0) throw new Error('Image response was empty');
-  return { bytes, mimeType: contentType };
-}
-
-function normalizeImageMimeType(mimeType: string) {
-  return mimeType.toLowerCase().split(';', 1)[0]?.trim() || 'image/png';
-}
-
 function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
   const agentIdSchema = z.string().min(1).describe('Windows agent ID, e.g. desktop-01');
@@ -112,18 +98,25 @@ function buildMcpServer() {
   );
   server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
 
-  server.registerTool('fetch_image_block', { description: 'Fetch an image URL and return it as an MCP image content block. Useful for testing whether the MCP client renders image blocks.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.unknown() }) }, async ({ url }) => {
-    const { bytes, mimeType } = await fetchImage(url);
-    const content = [{ type: 'image' as const, data: bytes.toString('base64'), mimeType: normalizeImageMimeType(mimeType) }];
-    return { content, structuredContent: { result: content } };
-  });
+  server.registerTool('get_screen_info', {
+    description: 'List every attached display/monitor, including stable index, device name, bounds, resolution, primary status, and virtual desktop coordinates.',
+    inputSchema: input({ agentId: agentIdSchema }),
+    outputSchema: z.object({ result: z.object({ platform: z.string(), screens: z.array(z.object({ index: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), width: z.number().int(), height: z.number().int(), primary: z.boolean() })) }) }),
+  }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_screen_info', { intent })));
 
-  server.registerTool('fetch_image_base64', { description: 'Fetch an image URL and return its Base64-encoded bytes as text.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ mimeType: z.string(), base64: z.string() }) }) }, async ({ url }) => {
-    const { bytes, mimeType } = await fetchImage(url);
-    return resultContent({ mimeType: normalizeImageMimeType(mimeType), base64: bytes.toString('base64') });
+  server.registerTool('take_screenshot', {
+    description: 'Capture a screenshot as a real MCP image block. By default captures all attached monitors individually; optionally pass screenIndex from get_screen_info to capture one monitor. Multi-monitor captures include one image block per monitor and metadata text.',
+    inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional() }),
+    outputSchema: z.object({ result: z.unknown() }),
+  }, async ({ agentId, screenIndex, intent }) => {
+    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; x: number; y: number; primary: boolean }> };
+    if (!captured || !Array.isArray(captured.screens)) throw new Error('Agent returned an invalid screenshot response');
+    const content = [
+      { type: 'text' as const, text: JSON.stringify({ count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) }, null, 2) },
+      ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
+    ];
+    return { content, structuredContent: { result: { count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) } } };
   });
-
-  server.registerTool('fetch_image_url', { description: 'Return the supplied image URL unchanged. Useful for testing whether ChatGPT can display an image from a URL.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.object({ url: z.string().url() }) }) }, async ({ url }) => resultContent({ url }));
 
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
   npmTool('npm_run', 'Run one named npm script with `npm run <script>`. Extra arguments are passed to that script after `--`.', ({ args }) => { const values = Array.isArray(args) ? args.map(String) : []; const script = values.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); return ['run', script, ...(values.length ? ['--', ...values] : [])]; });
