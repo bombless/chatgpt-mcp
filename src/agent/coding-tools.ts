@@ -452,7 +452,7 @@ async function getScreenInfo() {
     const screens = stdout.split(/\\r?\\n/u).slice(1).filter(Boolean).map((line, index) => {
       const m = line.match(/(?:\\*?)(\\d+)\\/(?:\\d+)x(\\d+)\\/(?:\\d+)\\+(-?\\d+)\\+(-?\\d+)/u);
       if (!m) return null;
-      return { index, deviceName: line.trim().split(/\\s+/u).slice(2).join(' '), x: Number(m[3]), y: Number(m[4]), width: Number(m[1]), height: Number(m[2]), primary: line.includes('*') };
+      return { index, deviceName: line.trim().split(/\\s+/u).slice(2).join(' '), x: Number(m[5]), y: Number(m[6]), width: Number(m[1]), height: Number(m[3]), primary: line.includes('*') };
     }).filter(Boolean);
     return { platform: process.platform, screens };
   }
@@ -472,7 +472,7 @@ async function takeScreenshot(args: Record<string, unknown>) {
       const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo','-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) });
       data = stdout.trim();
     } else if (process.platform === 'linux') {
-      const { stdout } = await execFileAsync('import', ['-window', 'root', 'png:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
+      const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${screen.width}x${screen.height}+${Math.max(0, screen.x)}+${Math.max(0, screen.y)}`, '+repage', 'png:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
       data = Buffer.from(stdout).toString('base64');
     } else throw new Error('Screen capture is supported on Windows and Linux/X11 only.');
     if (!data) throw new Error(`Screenshot capture returned no image data for display ${screen.index}`);
