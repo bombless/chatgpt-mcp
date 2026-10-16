@@ -274,7 +274,7 @@ Remote command execution is powerful. Start with PowerShell disabled and add an 
 ## Shared agent tools
 
 Reusable agent capabilities are maintained in [`bombless/agent-lib`](https://github.com/bombless/agent-lib).
-The `agent` branch dependency is declared in `package.json`, and the MCP server
+The `main` branch dependency is declared in `package.json`, and the MCP server
 registers the library's exported `agentMcpTools` metadata at startup.
 
 To add a reusable tool, update `agent-lib` with both its runtime implementation
