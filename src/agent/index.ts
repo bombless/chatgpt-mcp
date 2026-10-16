@@ -12,18 +12,38 @@ import type {
 import { runCodingTool } from './coding-tools.js'
 import keytar from 'keytar'
 
+function timeString (): string {
+  const d = new Date()
+  const hh = d.getHours().toString().padStart(2, '0')
+  const mm = d.getMinutes().toString().padStart(2, '0')
+  const ss = d.getSeconds().toString().padStart(2, '0')
+  return `${hh}:${mm}:${ss}`
+}
+
+function agentLog (...args: unknown[]) {
+  console.log(`[agent][${timeString()}]`, ...args)
+}
+
+function agentError (...args: unknown[]) {
+  console.error(`[agent][${timeString()}]`, ...args)
+}
+
 async function getConfig () {
   const get = async (key: string, fallback?: string) => {
-    const value = await keytar.getPassword('chatgpt-mcp', key)
-    if (value !== null) return value
+    try {
+      const value = await keytar.getPassword('chatgpt-mcp', key)
+      if (value !== null) return value
+    } catch {
+      // Keytar might fail on some platforms or permissions; fallback to env
+    }
     return fallback
   }
 
   return {
     serverUrl: process.env.SERVER_URL || (await get('SERVER_URL')) || 'ws://127.0.0.1:8787/agent',
-    agentToken: await get('AGENT_TOKEN'),
+    agentToken: process.env.AGENT_TOKEN || (await get('AGENT_TOKEN')),
     agentId: process.env.AGENT_ID || (await get('AGENT_ID')) || os.hostname(),
-    allowCommandExecution: await get('ALLOW_COMMAND_EXECUTION')
+    allowCommandExecution: process.env.ALLOW_COMMAND_EXECUTION || (await get('ALLOW_COMMAND_EXECUTION'))
   }
 }
 
@@ -37,6 +57,12 @@ getConfig().then(config => {
   const ALLOW_COMMAND_EXECUTION = config.allowCommandExecution === 'true'
   const IS_WINDOWS = process.platform === 'win32'
   const IS_LINUX = process.platform === 'linux'
+
+  const PING_INTERVAL_MS = Number(process.env.AGENT_PING_INTERVAL_MS ?? 20_000)
+  const PING_TIMEOUT_MS = Number(process.env.AGENT_PING_TIMEOUT_MS ?? 10_000)
+  const RECONNECT_DELAY_MS = Number(process.env.AGENT_RECONNECT_DELAY_MS ?? 3_000)
+  const STATUS_INTERVAL_MS = Number(process.env.AGENT_STATUS_INTERVAL_MS ?? 300_000) // 5 minutes
+  const AGENT_DEBUG = process.env.AGENT_DEBUG === '1' || process.env.DEBUG === '1'
 
   if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set')
 
@@ -59,7 +85,7 @@ getConfig().then(config => {
   }
 
   function logCommand (command: string, cwd?: string) {
-    console.log(`[agent] $ ${command}${cwd ? ` (cwd: ${cwd})` : ''}`)
+    agentLog(`$ ${command}${cwd ? ` (cwd: ${cwd})` : ''}`)
   }
 
   async function run (request: AgentRequest): Promise<unknown> {
@@ -165,11 +191,119 @@ getConfig().then(config => {
     }
   }
 
+  let currentWs: WebSocket | null = null
+  let pingTimer: NodeJS.Timeout | null = null
+  let pongTimeoutTimer: NodeJS.Timeout | null = null
+  let statusTimer: NodeJS.Timeout | null = null
+  let reconnectTimer: NodeJS.Timeout | null = null
+  let connectionStartTime = 0
+  let lastPingTime = 0
+  let lastPongLatency = 0
+  let terminationReason = ''
+
+  function clearHeartbeatTimers () {
+    if (pingTimer) {
+      clearInterval(pingTimer)
+      pingTimer = null
+    }
+    if (pongTimeoutTimer) {
+      clearTimeout(pongTimeoutTimer)
+      pongTimeoutTimer = null
+    }
+    if (statusTimer) {
+      clearInterval(statusTimer)
+      statusTimer = null
+    }
+  }
+
+  function scheduleReconnect (delayMs: number) {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connect()
+    }, delayMs)
+  }
+
+  function startHeartbeat (ws: WebSocket) {
+    clearHeartbeatTimers()
+
+    pingTimer = setInterval(() => {
+      if (ws !== currentWs || ws.readyState !== WebSocket.OPEN) return
+
+      lastPingTime = Date.now()
+
+      // If pong is not received within PING_TIMEOUT_MS, declare connection dead
+      pongTimeoutTimer = setTimeout(() => {
+        if (ws !== currentWs) return
+        terminationReason = `Heartbeat timeout: server did not respond to ping within ${PING_TIMEOUT_MS / 1000}s`
+        agentError(`${terminationReason}. Terminating connection and reconnecting...`)
+        try {
+          ws.terminate()
+        } catch (err: any) {
+          agentError(`Error terminating socket: ${err.message}`)
+        }
+      }, PING_TIMEOUT_MS)
+
+      try {
+        ws.ping()
+        if (AGENT_DEBUG) {
+          agentLog('Ping sent')
+        }
+      } catch (err: any) {
+        agentError(`Failed to send ping: ${err.message}`)
+      }
+    }, PING_INTERVAL_MS)
+
+    // Periodic heartbeat summary every STATUS_INTERVAL_MS (default 5m)
+    statusTimer = setInterval(() => {
+      if (ws !== currentWs || ws.readyState !== WebSocket.OPEN) return
+      const uptimeMins = Math.floor((Date.now() - connectionStartTime) / 60_000)
+      const latencyStr = lastPongLatency > 0 ? `, last ping rtt: ${lastPongLatency}ms` : ''
+      agentLog(`Heartbeat active: connection healthy (uptime: ${uptimeMins}m${latencyStr})`)
+    }, STATUS_INTERVAL_MS)
+  }
+
   function connect () {
-    const ws = new WebSocket(SERVER_URL, {
-      headers: { Authorization: `Bearer ${AGENT_TOKEN}` }
-    })
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    clearHeartbeatTimers()
+
+    agentLog(`Connecting to ${SERVER_URL} ...`)
+
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(SERVER_URL, {
+        headers: { Authorization: `Bearer ${AGENT_TOKEN}` },
+        handshakeTimeout: 10_000
+      })
+      currentWs = ws
+    } catch (err: any) {
+      agentError(`Failed to initialize WebSocket: ${err.message}`)
+      scheduleReconnect(RECONNECT_DELAY_MS)
+      return
+    }
+
     ws.on('open', () => {
+      if (ws !== currentWs) return
+      connectionStartTime = Date.now()
+      lastPingTime = 0
+      lastPongLatency = 0
+      terminationReason = ''
+
+      // Enable TCP keepalive if underlying socket is available
+      try {
+        const netSocket = (ws as any)._socket
+        if (netSocket && typeof netSocket.setKeepAlive === 'function') {
+          netSocket.setKeepAlive(true, 15_000)
+        }
+      } catch {
+        // Best effort
+      }
+
       ws.send(
         JSON.stringify({
           type: 'hello',
@@ -179,19 +313,49 @@ getConfig().then(config => {
           version: AGENT_VERSION
         })
       )
-      console.log(`[agent] connected as ${AGENT_ID}`)
+      agentLog(`Connected as ${AGENT_ID}`)
+      agentLog(`Heartbeat keepalive active (interval: ${PING_INTERVAL_MS / 1000}s, timeout: ${PING_TIMEOUT_MS / 1000}s)`)
+
+      startHeartbeat(ws)
     })
+
+    ws.on('pong', () => {
+      if (ws !== currentWs) return
+      if (pongTimeoutTimer) {
+        clearTimeout(pongTimeoutTimer)
+        pongTimeoutTimer = null
+      }
+      if (lastPingTime) {
+        lastPongLatency = Date.now() - lastPingTime
+      }
+      if (AGENT_DEBUG) {
+        agentLog(`Pong received (rtt: ${lastPongLatency}ms)`)
+      }
+    })
+
+    ws.on('ping', () => {
+      if (ws !== currentWs) return
+      if (AGENT_DEBUG) {
+        agentLog('Server ping received')
+      }
+    })
+
     ws.on('message', async raw => {
+      if (pongTimeoutTimer) {
+        clearTimeout(pongTimeoutTimer)
+        pongTimeoutTimer = null
+      }
+
       let request: AgentRequest
       try {
         request = JSON.parse(raw.toString()) as AgentRequest
       } catch {
-        console.error('[agent] invalid JSON request')
+        agentError('Invalid JSON request')
         return
       }
       if ((request as any).type === 'server_diagnostic') {
         const diagnostic = request as any
-        console.error(`[agent][server][${diagnostic.level ?? 'error'}] tool=${diagnostic.tool ?? 'unknown'}${diagnostic.requestId ? ` requestId=${diagnostic.requestId}` : ''}: ${diagnostic.message ?? 'unspecified server diagnostic'}`)
+        agentError(`[server][${diagnostic.level ?? 'error'}] tool=${diagnostic.tool ?? 'unknown'}${diagnostic.requestId ? ` requestId=${diagnostic.requestId}` : ''}: ${diagnostic.message ?? 'unspecified server diagnostic'}`)
         return
       }
       if (request.type !== 'request' || !request.id || !request.tool) return
@@ -199,17 +363,10 @@ getConfig().then(config => {
         typeof request.args?.intent === 'string'
           ? request.args.intent.trim()
           : ''
-      const time = `${new Date()
-        .getHours()
-        .toString()
-        .padStart(2, '0')}:${new Date()
-        .getMinutes()
-        .toString()
-        .padStart(2, '0')}`
-      console.log(`[agent][${time}] tool=${request.tool} requestId=${request.id} started`)
-      if (intent) console.log(`[agent][${time}] intent: ${intent}`)
-      else
-        console.log(`[agent][${time}] intent: (missing) tool=${request.tool}`)
+      agentLog(`tool=${request.tool} requestId=${request.id} started`)
+      if (intent) agentLog(`intent: ${intent}`)
+      else agentLog(`intent: (missing) tool=${request.tool}`)
+
       const response: AgentResponse = {
         type: 'response',
         id: request.id,
@@ -220,25 +377,96 @@ getConfig().then(config => {
         response.ok = true
       } catch (error) {
         response.error = error instanceof Error ? error.message : String(error)
-        console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: ${response.error}`)
+        agentError(`tool=${request.tool} requestId=${request.id} FAILED: ${response.error}`)
       }
       if (ws.readyState === WebSocket.OPEN) {
         const serialized = JSON.stringify(response)
-        console.log(`[agent][${time}] tool=${request.tool} requestId=${request.id} response=${response.ok ? 'ok' : 'error'} payloadBytes=${Buffer.byteLength(serialized, 'utf8')}`)
-        ws.send(serialized)
-      } else console.error(`[agent][${time}] tool=${request.tool} requestId=${request.id} FAILED: WebSocket is not open; response could not be delivered`)
+        agentLog(`tool=${request.tool} requestId=${request.id} response=${response.ok ? 'ok' : 'error'} payloadBytes=${Buffer.byteLength(serialized, 'utf8')}`)
+        ws.send(serialized, err => {
+          if (err) {
+            agentError(`tool=${request.tool} requestId=${request.id} FAILED to deliver response: ${err.message}`)
+          }
+        })
+      } else {
+        agentError(`tool=${request.tool} requestId=${request.id} FAILED: WebSocket is not open (readyState=${ws.readyState}); response could not be delivered`)
+      }
     })
-    ws.on('close', () => {
-      console.log('[agent] disconnected; reconnecting in 3s')
-      setTimeout(connect, 3000)
+
+    ws.on('close', (code, reasonBuf) => {
+      if (ws === currentWs) {
+        currentWs = null
+      }
+      clearHeartbeatTimers()
+
+      const reasonStr = reasonBuf ? reasonBuf.toString('utf8') : ''
+      const detail = terminationReason || reasonStr || ''
+      terminationReason = ''
+
+      let delay = RECONNECT_DELAY_MS
+
+      if (code === 4000) {
+        delay = 15_000
+        agentError(
+          `Disconnected by server: another connection registered with agentId "${AGENT_ID}" (code: 4000). Waiting ${delay / 1000}s before reconnecting to prevent connection conflict...`
+        )
+      } else if (code === 4001) {
+        delay = 10_000
+        agentError(
+          `Disconnected by server: authentication failed (code: 4001, invalid AGENT_TOKEN). Retrying in ${delay / 1000}s...`
+        )
+      } else if (code === 4002) {
+        delay = 10_000
+        agentError(
+          `Disconnected by server: invalid agentId "${AGENT_ID}" (code: 4002). Retrying in ${delay / 1000}s...`
+        )
+      } else if (code === 4003) {
+        agentError(`Disconnected by server: hello handshake required (code: 4003). Reconnecting in ${delay / 1000}s...`)
+      } else if (code === 1006) {
+        agentError(
+          `Disconnected (code: 1006 abnormal closure${detail ? `, ${detail}` : ', network dropped or connection reset'}). Reconnecting in ${delay / 1000}s...`
+        )
+      } else {
+        agentLog(
+          `Disconnected from server (code: ${code}${detail ? `, reason: "${detail}"` : ''}). Reconnecting in ${delay / 1000}s...`
+        )
+      }
+
+      scheduleReconnect(delay)
     })
-    ws.on('error', error =>
-      console.error('[agent] websocket error:', error.message)
-    )
+
+    ws.on('error', error => {
+      agentError(`WebSocket error: ${error.message}`)
+    })
   }
 
-  console.log(
-    `[agent] mode: ${
+  process.on('SIGINT', () => {
+    agentLog('Received SIGINT, shutting down...')
+    clearHeartbeatTimers()
+    if (currentWs) {
+      try { currentWs.close(1000, 'Agent shutting down') } catch {}
+    }
+    process.exit(0)
+  })
+
+  process.on('SIGTERM', () => {
+    agentLog('Received SIGTERM, shutting down...')
+    clearHeartbeatTimers()
+    if (currentWs) {
+      try { currentWs.close(1000, 'Agent shutting down') } catch {}
+    }
+    process.exit(0)
+  })
+
+  process.on('uncaughtException', err => {
+    agentError(`Uncaught exception: ${err?.stack || err}`)
+  })
+
+  process.on('unhandledRejection', reason => {
+    agentError(`Unhandled rejection: ${reason instanceof Error ? reason.stack : reason}`)
+  })
+
+  agentLog(
+    `Mode: ${
       IS_WINDOWS
         ? 'windows/powershell'
         : IS_LINUX
@@ -246,11 +474,15 @@ getConfig().then(config => {
         : process.platform
     }`
   )
-  console.log(`[agent] workspace: ${WORKSPACE_ROOT}`)
-  console.log(
-    `[agent] command execution: ${
+  agentLog(`Workspace: ${WORKSPACE_ROOT}`)
+  agentLog(
+    `Command execution: ${
       ALLOW_COMMAND_EXECUTION ? 'ENABLED' : 'DISABLED'
     }`
   )
+  agentLog(`Server URL: ${SERVER_URL}`)
   connect()
+}).catch(err => {
+  console.error(`[agent] Fatal initialization error:`, err)
+  process.exit(1)
 })

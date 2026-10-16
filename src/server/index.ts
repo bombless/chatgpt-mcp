@@ -43,7 +43,10 @@ class AgentRegistry {
   }
   async call(agentId: string, tool: ToolName, args: Record<string, unknown>) {
     const socket = this.get(agentId);
-    if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Windows agent '${agentId}' is not connected`); }
+    if (!socket) {
+      mcpDebug('agent-call:missing', { agentId, tool, connectedAgents: this.list() });
+      throw new Error(`Windows agent '${agentId}' is not connected (currently connected: [${this.list().join(', ')}])`);
+    }
     const id = crypto.randomUUID(); const request: AgentRequest = { type: 'request', id, tool, args }; mcpDebug('agent-call:start', { requestId: id, agentId, tool });
     return await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); mcpDebug('agent-call:timeout', { requestId: id, agentId, tool, timeoutMs: REQUEST_TIMEOUT_MS }); reject(new Error(`Agent request timed out after ${REQUEST_TIMEOUT_MS}ms`)); }, REQUEST_TIMEOUT_MS);
@@ -247,7 +250,19 @@ httpServer.on('upgrade', (req, socket, head) => {
 wss.on('connection', ws => {
   let agentId: string | undefined;
   let initialized = false;
+  const sock = ws as WebSocket & { isAlive?: boolean };
+  sock.isAlive = true;
+
+  const nowTime = () => {
+    const d = new Date();
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+  };
+
+  sock.on('pong', () => { sock.isAlive = true; });
+  sock.on('ping', () => { sock.isAlive = true; });
+
   ws.on('message', raw => {
+    sock.isAlive = true;
     try {
       const message = JSON.parse(raw.toString()) as AgentMessage;
       if (message.type === 'hello') {
@@ -255,16 +270,42 @@ wss.on('connection', ws => {
         agentId = message.agentId;
         initialized = true;
         registry.add(agentId, ws);
-        console.log(`[agent] connected ${agentId} (${message.hostname})`);
+        console.log(`[agent][${nowTime()}] connected ${agentId} (${message.hostname})`);
         return;
       }
       if (!initialized) return ws.close(4003, 'hello required');
       registry.handleMessage(message);
     } catch { ws.close(4004, 'invalid message'); }
   });
-  const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
-  ws.on('close', () => { if (agentId) console.log(`[agent][${time}] disconnected ${agentId}`); });
+
+  ws.on('error', err => {
+    console.error(`[agent][${nowTime()}] socket error for ${agentId ?? 'unregistered'}:`, err.message);
+  });
+
+  ws.on('close', (code, reason) => {
+    const reasonText = reason ? reason.toString('utf8') : '';
+    if (agentId) {
+      console.log(`[agent][${nowTime()}] disconnected ${agentId} (code: ${code}${reasonText ? `, reason: "${reasonText}"` : ''})`);
+    }
+  });
 });
+
+const serverHeartbeatInterval = setInterval(() => {
+  wss.clients.forEach(client => {
+    const sock = client as WebSocket & { isAlive?: boolean };
+    if (sock.isAlive === false) {
+      mcpDebug('heartbeat:dead-connection-terminated');
+      return sock.terminate();
+    }
+    sock.isAlive = false;
+    try {
+      sock.ping();
+    } catch {
+      sock.terminate();
+    }
+  });
+}, 30_000);
+serverHeartbeatInterval.unref();
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`MCP gateway listening on :${PORT}`);
