@@ -283,7 +283,7 @@ repository can pick up the branch head with `npm i`; no separate
 `chatgpt-mcp` PR is needed for a tool that follows this registry contract.
 Restart/rebuild the MCP service after installing.
 
-The repository currently has no committed `package-lock.json`. Keep deployment
-installs on a fresh checkout (or refresh the dependency tree explicitly) so the
-Git branch reference resolves to the latest `agent-lib` commit. A persistent
-lockfile or already-installed dependency may keep an older commit pinned.
+The `.npmrc` setting disables npm lockfile use/generation so deployment
+installs can resolve the current `agent-lib#main` branch. This intentionally
+trades away reproducible dependency resolution for simpler rolling updates;
+prefer a fresh deployment install and run the typecheck/tests before release.
