@@ -9,6 +9,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
+import { agentMcpTools } from '@bombless/agent-lib';
 import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
 import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
@@ -35,7 +36,7 @@ class AgentRegistry {
   add(agentId: string, socket: WebSocket) { const old = this.agents.get(agentId); old?.close(4000, 'replaced by a newer connection'); this.agents.set(agentId, socket); socket.on('close', () => { if (this.agents.get(agentId) === socket) this.agents.delete(agentId); }); }
   get(agentId: string) { const socket = this.agents.get(agentId); return socket?.readyState === WebSocket.OPEN ? socket : undefined; }
   list() { return [...this.agents.keys()]; }
-  async call(agentId: string, tool: ToolName, args: Record<string, unknown>) {
+  async call(agentId: string, tool: string, args: Record<string, unknown>) {
     const socket = this.get(agentId);
     if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Windows agent '${agentId}' is not connected`); }
     const id = crypto.randomUUID(); const request: AgentRequest = { type: 'request', id, tool, args }; mcpDebug('agent-call:start', { requestId: id, agentId, tool });
@@ -121,7 +122,17 @@ function buildMcpServer() {
   }, async ({ agentId, url, intent }) =>
     resultContent(await registry.call(agentId, 'test_proxy_7897', { url, intent }))
   );
-  server.registerTool('get_system_info', { description: 'Get basic Windows or Linux system information.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
+  // Shared tools are registered from agent-lib metadata. Add new reusable
+  // tools there (implementation + schema/description) instead of duplicating
+  // their MCP registration in this repository.
+  for (const tool of agentMcpTools) {
+    server.registerTool(tool.name, {
+      description: tool.description,
+      inputSchema: input({ ...tool.inputSchema, agentId: agentIdSchema }),
+      outputSchema: tool.outputSchema,
+    }, async (args: Record<string, unknown>) =>
+      resultContent(await registry.call(String(args.agentId), tool.name, args)));
+  }
 
   server.registerTool('fetch_image_block', { description: 'Fetch an image URL and return it as an MCP image content block. Useful for testing whether the MCP client renders image blocks.', inputSchema: input({ url: z.string().url() }), outputSchema: z.object({ result: z.unknown() }) }, async ({ url }) => {
     const { bytes, mimeType } = await fetchImage(url);
