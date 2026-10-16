@@ -270,3 +270,20 @@ Remote command execution is powerful. Start with PowerShell disabled and add an 
 - Command allowlists and audit logging
 - Multiple Windows agents with explicit targeting
 - MCP integration/end-to-end tests
+
+## Shared agent tools
+
+Reusable agent capabilities are maintained in [`bombless/agent-lib`](https://github.com/bombless/agent-lib).
+The `agent` branch dependency is declared in `package.json`, and the MCP server
+registers the library's exported `agentMcpTools` metadata at startup.
+
+To add a reusable tool, update `agent-lib` with both its runtime implementation
+and its MCP metadata, then merge that PR. A fresh deployment checkout of this
+repository can pick up the branch head with `npm i`; no separate
+`chatgpt-mcp` PR is needed for a tool that follows this registry contract.
+Restart/rebuild the MCP service after installing.
+
+The repository currently has no committed `package-lock.json`. Keep deployment
+installs on a fresh checkout (or refresh the dependency tree explicitly) so the
+Git branch reference resolves to the latest `agent-lib` commit. A persistent
+lockfile or already-installed dependency may keep an older commit pinned.
