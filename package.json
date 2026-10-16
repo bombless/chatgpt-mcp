@@ -24,7 +24,7 @@
     "qrcode": "^1.5.4",
     "ws": "^8.18.3",
     "zod": "^4.1.5",
-    "@bombless/agent-lib": "github:bombless/agent-lib#main"
+    "@bombless/agent-lib": "github:bombless/agent-lib#agent"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
