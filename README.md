@@ -274,7 +274,7 @@ Remote command execution is powerful. Start with PowerShell disabled and add an 
 ## Shared agent tools
 
 Reusable agent capabilities are maintained in [`bombless/agent-lib`](https://github.com/bombless/agent-lib).
-The `main` branch dependency is declared in `package.json`, and the MCP server
+The `agent` branch dependency is declared in `package.json`, and the MCP server
 registers the library's exported `agentMcpTools` metadata at startup.
 
 To add a reusable tool, update `agent-lib` with both its runtime implementation
@@ -284,6 +284,6 @@ repository can pick up the branch head with `npm i`; no separate
 Restart/rebuild the MCP service after installing.
 
 The `.npmrc` setting disables npm lockfile use/generation so deployment
-installs can resolve the current `agent-lib#main` branch. This intentionally
+installs can resolve the current `agent-lib#agent` branch. This intentionally
 trades away reproducible dependency resolution for simpler rolling updates;
 prefer a fresh deployment install and run the typecheck/tests before release.
