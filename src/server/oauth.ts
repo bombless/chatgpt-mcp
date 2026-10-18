@@ -14,13 +14,31 @@ function oauthDebug(event: string, details: Record<string, unknown> = {}) { if (
 
 type Client = { clientId: string; redirectUris: string[]; clientName?: string };
 
-export function oauthMetadata() {
-  const metadata = { issuer: PUBLIC_URL, authorization_endpoint: `${PUBLIC_URL}/oauth/authorize`, token_endpoint: `${PUBLIC_URL}/oauth/token`, registration_endpoint: `${PUBLIC_URL}/oauth/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['mcp'] };
+export function getBaseUrl(req?: Request): string {
+  if (req) {
+    const forwardedProto = req.get('x-forwarded-proto');
+    const forwardedHost = req.get('x-forwarded-host');
+    const host = forwardedHost || req.get('host');
+    if (host) {
+      const proto = (forwardedProto || req.protocol || 'https').split(',')[0].trim();
+      return `${proto}://${host.split(',')[0].trim()}`.replace(/\/$/, '');
+    }
+  }
+  if (process.env.PUBLIC_URL) {
+    return process.env.PUBLIC_URL.replace(/\/$/, '');
+  }
+  return `http://127.0.0.1:${process.env.PORT ?? 8787}`;
+}
+
+export function oauthMetadata(baseUrl?: string) {
+  const url = (baseUrl ?? PUBLIC_URL).replace(/\/$/, '');
+  const metadata = { issuer: url, authorization_endpoint: `${url}/oauth/authorize`, token_endpoint: `${url}/oauth/token`, registration_endpoint: `${url}/oauth/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['mcp'] };
   oauthDebug('metadata', { issuer: metadata.issuer });
   return metadata;
 }
-export function protectedResourceMetadata() {
-  const metadata = { resource: `${PUBLIC_URL}/mcp`, authorization_servers: [PUBLIC_URL], scopes_supported: ['mcp'], bearer_methods_supported: ['header'] };
+export function protectedResourceMetadata(baseUrl?: string) {
+  const url = (baseUrl ?? PUBLIC_URL).replace(/\/$/, '');
+  const metadata = { resource: `${url}/mcp`, authorization_servers: [url], scopes_supported: ['mcp'], bearer_methods_supported: ['header'] };
   oauthDebug('protected-resource-metadata', { resource: metadata.resource });
   return metadata;
 }
@@ -28,12 +46,28 @@ export function protectedResourceMetadata() {
 export async function registerClient(body: any) {
   oauthDebug('register:start', { clientName: body?.client_name, redirectUris: Array.isArray(body?.redirect_uris) ? body.redirect_uris : undefined });
   if (!Array.isArray(body?.redirect_uris) || body.redirect_uris.length === 0) throw new Error('redirect_uris is required');
-  for (const uri of body.redirect_uris) if (typeof uri !== 'string' || !/^https?:\/\//.test(uri)) throw new Error('redirect_uris must contain http(s) URLs');
+  for (const uri of body.redirect_uris) {
+    if (typeof uri !== 'string') throw new Error('redirect_uris must contain strings');
+    try {
+      const parsed = new URL(uri);
+      if (!parsed.protocol) throw new Error();
+    } catch {
+      throw new Error(`Invalid redirect_uri: ${uri}`);
+    }
+  }
   const clientId = random(24), db = await getDb(), now = Date.now();
   db.oauth_clients[clientId] = { client_id: clientId, redirect_uris: body.redirect_uris, client_name: body.client_name ?? null, created_at: now };
   await saveDb(db);
   oauthDebug('register:success', { clientId: short(clientId), redirectUriCount: body.redirect_uris.length });
-  return { client_id: clientId, client_name: body.client_name ?? 'MCP Client', redirect_uris: body.redirect_uris, token_endpoint_auth_method: 'none' };
+  return {
+    client_id: clientId,
+    client_name: body.client_name ?? 'MCP Client',
+    redirect_uris: body.redirect_uris,
+    grant_types: Array.isArray(body?.grant_types) ? body.grant_types : ['authorization_code', 'refresh_token'],
+    response_types: Array.isArray(body?.response_types) ? body.response_types : ['code'],
+    token_endpoint_auth_method: 'none',
+    client_id_issued_at: Math.floor(now / 1000),
+  };
 }
 
 async function getClient(clientId: string): Promise<Client | undefined> {
@@ -42,19 +76,32 @@ async function getClient(clientId: string): Promise<Client | undefined> {
 }
 async function getTotpSecret() { return (await getDb()).totp_config?.secret; }
 
-function isChatGptConnectorRedirect(uri: string) {
-  try { const url = new URL(uri); return url.protocol === 'https:' && url.hostname === 'chatgpt.com' && url.pathname.startsWith('/connector/oauth/'); } catch { return false; }
+function isKnownPublicClientRedirect(uri: string) {
+  try {
+    const url = new URL(uri);
+    if (url.protocol === 'https:' && url.hostname === 'chatgpt.com' && url.pathname.startsWith('/connector/oauth/')) {
+      return 'ChatGPT';
+    }
+    if (url.protocol === 'https:' && (url.hostname === 'claude.ai' || url.hostname === 'claude.com') && url.pathname.startsWith('/api/mcp/')) {
+      return 'Claude';
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
+
 async function ensurePublicClient(clientId: string, redirectUri: string) {
   const db = await getDb();
   const existing = db.oauth_clients[clientId];
   if (existing) return { client: { clientId: existing.client_id, redirectUris: existing.redirect_uris, clientName: existing.client_name ?? undefined } as Client, created: false };
-  if (!isChatGptConnectorRedirect(redirectUri)) return { client: undefined, created: false };
+  const clientName = isKnownPublicClientRedirect(redirectUri);
+  if (!clientName) return { client: undefined, created: false };
   const now = Date.now();
-  db.oauth_clients[clientId] = { client_id: clientId, redirect_uris: [redirectUri], client_name: 'ChatGPT', created_at: now };
+  db.oauth_clients[clientId] = { client_id: clientId, redirect_uris: [redirectUri], client_name: clientName, created_at: now };
   await saveDb(db);
-  const client: Client = { clientId, redirectUris: [redirectUri], clientName: 'ChatGPT' };
-  oauthDebug('authorize:implicit-public-client', { clientId: short(clientId), redirectUri });
+  const client: Client = { clientId, redirectUris: [redirectUri], clientName };
+  oauthDebug('authorize:implicit-public-client', { clientId: short(clientId), redirectUri, clientName });
   return { client, created: true };
 }
 
@@ -66,11 +113,12 @@ export async function authorizationPage(req: Request) {
   const redirectUriAllowed = Boolean(client?.redirectUris.includes(redirectUri));
   oauthDebug('authorize:start', { clientId: short(clientId), redirectUri, responseType, hasState: Boolean(state), hasCodeChallenge: Boolean(codeChallenge), codeChallengeMethod, resource, clientFound: Boolean(client), existingClient, implicitPublicClient: !existingClient && Boolean(client), redirectUriAllowed });
   const secret = await getTotpSecret();
-  if (!client || responseType !== 'code' || !redirectUriAllowed || codeChallengeMethod !== 'S256' || !codeChallenge) { oauthDebug('authorize:rejected', { clientId: short(clientId), responseType, redirectUri, reason: !client ? 'unknown_client' : responseType !== 'code' ? 'unsupported_response_type' : !redirectUriAllowed ? 'redirect_uri_mismatch' : codeChallengeMethod !== 'S256' ? 'unsupported_pkce_method' : 'missing_code_challenge' }); return { status: 400, body: 'Invalid OAuth authorization request.' }; }
+  if (!client || responseType !== 'code' || !redirectUriAllowed || codeChallengeMethod?.toUpperCase() !== 'S256' || !codeChallenge) { oauthDebug('authorize:rejected', { clientId: short(clientId), responseType, redirectUri, reason: !client ? 'unknown_client' : responseType !== 'code' ? 'unsupported_response_type' : !redirectUriAllowed ? 'redirect_uri_mismatch' : codeChallengeMethod?.toUpperCase() !== 'S256' ? 'unsupported_pkce_method' : 'missing_code_challenge' }); return { status: 400, body: 'Invalid OAuth authorization request.' }; }
   if (!secret) return { status: 503, body: 'MCP owner authentication is not configured. Open the local admin page at / and configure Authenticator first.' };
   const action = `/oauth/authorize/approve?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge)}`;
   oauthDebug('authorize:page', { clientId: short(clientId), redirectUri });
-  return { status: 200, body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Windows MCP</title></head><body style="font-family:system-ui,sans-serif;max-width:640px;margin:60px auto;padding:0 18px"><h2>Authorize Windows MCP</h2><p>${html(client.clientName ?? 'An MCP client')} requests access to your Windows computer through <b>${html(PUBLIC_URL)}</b>.</p><ul><li>Read and write files within configured directories</li><li>Inspect connected Windows agents</li><li>Execute PowerShell only if enabled by the agent policy</li></ul><form method="post" action="${action}"><label>Authenticator code</label><input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required style="display:block;font-size:28px;letter-spacing:8px;width:180px;padding:8px;margin:12px 0"><button style="padding:10px 18px">Authorize</button></form></body></html>` };
+  const displayUrl = getBaseUrl(req);
+  return { status: 200, body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Windows MCP</title></head><body style="font-family:system-ui,sans-serif;max-width:640px;margin:60px auto;padding:0 18px"><h2>Authorize Windows MCP</h2><p>${html(client.clientName ?? 'An MCP client')} requests access to your Windows computer through <b>${html(displayUrl)}</b>.</p><ul><li>Read and write files within configured directories</li><li>Inspect connected Windows agents</li><li>Execute PowerShell only if enabled by the agent policy</li></ul><form method="post" action="${action}"><label>Authenticator code</label><input name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required style="display:block;font-size:28px;letter-spacing:8px;width:180px;padding:8px;margin:12px 0"><button style="padding:10px 18px">Authorize</button></form></body></html>` };
 }
 
 export async function approve(req: Request) {
