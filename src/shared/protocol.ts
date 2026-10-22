@@ -43,6 +43,7 @@ export type ToolName =
   | 'get_system_info'
   | 'get_screen_info'
   | 'take_screenshot'
+  | 'click_mouse'
   | 'get_screen_pixel'
   | 'npm_test'
   | 'npm_run'

@@ -121,11 +121,22 @@ function buildMcpServer() {
   }, z.object({ result: z.object({ screenIndex: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), absoluteX: z.number().int(), absoluteY: z.number().int(), r: z.number().int().min(0).max(255), g: z.number().int().min(0).max(255), b: z.number().int().min(0).max(255), hex: z.string(), format: z.string(), note: z.string() }) }));
   
   server.registerTool('take_screenshot', {
-    description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Call get_screen_info for display indices and bounds.',
-    inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional(), x: z.number().int().min(0).optional(), y: z.number().int().min(0).optional(), width: z.number().int().min(1).optional(), height: z.number().int().min(1).optional() }),
-  }, async ({ agentId, screenIndex, x, y, width, height, intent }) => {
+    description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Pass highlightCursor=true to visually emphasize the mouse cursor position on the captured image. Returns current mouse cursor coordinates. Call get_screen_info for display indices and bounds.',
+    inputSchema: input({
+      agentId: agentIdSchema,
+      screenIndex: z.number().int().min(0).optional(),
+      x: z.number().int().min(0).optional(),
+      y: z.number().int().min(0).optional(),
+      width: z.number().int().min(1).optional(),
+      height: z.number().int().min(1).optional(),
+      highlightCursor: z.boolean().optional(),
+    }),
+  }, async ({ agentId, screenIndex, x, y, width, height, highlightCursor, intent }) => {
     try {
-    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }> };
+    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, highlightCursor, intent }) as {
+      cursor?: { x: number; y: number; screenIndex: number | null; relativeX: number | null; relativeY: number | null } | null;
+      screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }>;
+    };
     if (!captured || !Array.isArray(captured.screens) || captured.screens.length === 0) throw new Error('Agent returned an invalid or empty screenshot response');
     if (captured.screens.some(screen => !screen.data || !/^image\/(png|jpeg|webp)$/u.test(screen.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(screen.data))) {
       throw new Error('Agent returned invalid screenshot image data');
@@ -140,7 +151,14 @@ function buildMcpServer() {
       mcpDebug('screenshot:integrity-ok', { agentId, screenIndex: screen.index, width: screen.width, height: screen.height, bytes: bytes.length, sha256: digest });
     }
     const content = [
-      { type: 'text' as const, text: JSON.stringify({ count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) }, null, 2) },
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          cursor: captured.cursor ?? null,
+          count: captured.screens.length,
+          screens: captured.screens.map(({ data, ...metadata }) => metadata),
+        }, null, 2),
+      },
       ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
     ];
     // Do not return structuredContent for screenshots: clients may prioritize it
@@ -153,6 +171,27 @@ function buildMcpServer() {
       throw new Error(`take_screenshot failed: ${message}`);
     }
   });
+
+  codingTool('click_mouse', 'Click or double-click the mouse at specified coordinates or current cursor position. If screenIndex is provided, x and y are relative to that display; otherwise they are absolute virtual-desktop coordinates. If x and y are omitted, clicks at current cursor position.', {
+    agentId: agentIdSchema,
+    screenIndex: z.number().int().min(0).optional(),
+    x: z.number().int().optional(),
+    y: z.number().int().optional(),
+    button: z.enum(['left', 'right', 'middle']).default('left'),
+    doubleClick: z.boolean().default(false),
+    clickCount: z.number().int().min(1).max(3).default(1),
+  }, z.object({
+    result: z.object({
+      ok: z.literal(true),
+      button: z.enum(['left', 'right', 'middle']),
+      clickCount: z.number().int(),
+      x: z.number().int(),
+      y: z.number().int(),
+      screenIndex: z.number().int().nullable(),
+      relativeX: z.number().int().nullable(),
+      relativeY: z.number().int().nullable(),
+    })
+  }));
 
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
   npmTool('npm_run', 'Run one named npm script with `npm run <script>`. Extra arguments are passed to that script after `--`.', ({ args }) => { const values = Array.isArray(args) ? args.map(String) : []; const script = values.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); return ['run', script, ...(values.length ? ['--', ...values] : [])]; });
