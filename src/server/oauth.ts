@@ -17,11 +17,16 @@ type Client = { clientId: string; redirectUris: string[]; clientName?: string };
 export function getBaseUrl(req?: Request): string {
   if (req) {
     const forwardedProto = req.get('x-forwarded-proto');
-    const forwardedHost = req.get('x-forwarded-host');
-    const host = forwardedHost || req.get('host');
-    if (host) {
-      const proto = (forwardedProto || req.protocol || 'https').split(',')[0].trim();
-      return `${proto}://${host.split(',')[0].trim()}`.replace(/\/$/, '');
+    const forwardedHost = req.get('x-forwarded-host') || req.get('x-original-host');
+    const rawHost = forwardedHost || req.get('host');
+    if (rawHost) {
+      const host = rawHost.split(',')[0].trim();
+      let proto = (forwardedProto || req.protocol || '').split(',')[0].trim();
+      const isLoopback = host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('::1') || host.startsWith('0.0.0.0');
+      if (!proto || (!isLoopback && proto === 'http')) {
+        proto = 'https';
+      }
+      return `${proto}://${host}`.replace(/\/$/, '');
     }
   }
   if (process.env.PUBLIC_URL) {
@@ -31,13 +36,13 @@ export function getBaseUrl(req?: Request): string {
 }
 
 export function oauthMetadata(baseUrl?: string) {
-  const url = (baseUrl ?? PUBLIC_URL).replace(/\/$/, '');
+  const url = (baseUrl || getBaseUrl()).replace(/\/$/, '');
   const metadata = { issuer: url, authorization_endpoint: `${url}/oauth/authorize`, token_endpoint: `${url}/oauth/token`, registration_endpoint: `${url}/oauth/register`, response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'], scopes_supported: ['mcp'] };
   oauthDebug('metadata', { issuer: metadata.issuer });
   return metadata;
 }
 export function protectedResourceMetadata(baseUrl?: string) {
-  const url = (baseUrl ?? PUBLIC_URL).replace(/\/$/, '');
+  const url = (baseUrl || getBaseUrl()).replace(/\/$/, '');
   const metadata = { resource: `${url}/mcp`, authorization_servers: [url], scopes_supported: ['mcp'], bearer_methods_supported: ['header'] };
   oauthDebug('protected-resource-metadata', { resource: metadata.resource });
   return metadata;

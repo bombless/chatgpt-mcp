@@ -21,7 +21,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 const LEGACY_MCP_TOKEN = process.env.MCP_TOKEN;
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
+const PUBLIC_URL = process.env.PUBLIC_URL ? process.env.PUBLIC_URL.replace(/\/$/, '') : undefined;
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 60_000);
 const MCP_DEBUG = process.env.MCP_DEBUG === '1' || process.env.DEBUG_MCP === '1';
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
@@ -350,7 +350,12 @@ wss.on('connection', ws => {
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`MCP gateway listening on :${PORT}`);
-  console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
-  console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
+  if (PUBLIC_URL) {
+    console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
+    console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
+  } else {
+    console.log(`Public MCP: dynamic (determined by request Host header, e.g. https://<your-host>/mcp)`);
+    console.log(`Agent endpoint: ws://127.0.0.1:${PORT}/agent (or wss://<your-host>/agent)`);
+  }
   console.log(`Debug logging: MCP=${MCP_DEBUG ? 'on' : 'off'}`);
 });

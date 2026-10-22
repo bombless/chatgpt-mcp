@@ -15,6 +15,51 @@ test('getBaseUrl extracts host and proto from request headers', () => {
   assert.equal(getBaseUrl(req), 'https://test-ngrok.ngrok-free.dev');
 });
 
+test('getBaseUrl defaults remote domains to https even when x-forwarded-proto is absent', () => {
+  const req = {
+    get(name: string) {
+      if (name.toLowerCase() === 'host') return 'bombless.duckdns.org';
+      return undefined;
+    },
+    protocol: 'http',
+  } as any;
+
+  assert.equal(getBaseUrl(req), 'https://bombless.duckdns.org');
+});
+
+test('getBaseUrl preserves http for loopback addresses', () => {
+  const req = {
+    get(name: string) {
+      if (name.toLowerCase() === 'host') return '127.0.0.1:8787';
+      return undefined;
+    },
+    protocol: 'http',
+  } as any;
+
+  assert.equal(getBaseUrl(req), 'http://127.0.0.1:8787');
+});
+
+test('getBaseUrl extracts host from x-original-host if present', () => {
+  const req = {
+    get(name: string) {
+      if (name.toLowerCase() === 'x-original-host') return 'my-proxy-host.com';
+      return undefined;
+    },
+    protocol: 'http',
+  } as any;
+
+  assert.equal(getBaseUrl(req), 'https://my-proxy-host.com');
+});
+
+test('oauthMetadata and protectedResourceMetadata work without baseUrl argument', () => {
+  const meta = oauthMetadata();
+  assert.ok(meta.issuer.startsWith('http'));
+  assert.ok(meta.authorization_endpoint.endsWith('/oauth/authorize'));
+
+  const protectedMeta = protectedResourceMetadata();
+  assert.ok(protectedMeta.resource.endsWith('/mcp'));
+});
+
 test('oauthMetadata generates endpoints matching base URL', () => {
   const metadata = oauthMetadata('https://test-ngrok.ngrok-free.dev');
   assert.equal(metadata.issuer, 'https://test-ngrok.ngrok-free.dev');
