@@ -193,6 +193,44 @@ function buildMcpServer() {
     })
   }));
 
+  codingTool('move_mouse', 'Move the mouse cursor to specified coordinates. If screenIndex is provided, x and y are relative to that display; otherwise they are absolute virtual-desktop coordinates.', {
+    agentId: agentIdSchema,
+    screenIndex: z.number().int().min(0).optional(),
+    x: z.number().int(),
+    y: z.number().int(),
+  }, z.object({
+    result: z.object({
+      ok: z.literal(true),
+      x: z.number().int(),
+      y: z.number().int(),
+      screenIndex: z.number().int().nullable(),
+      relativeX: z.number().int().nullable(),
+      relativeY: z.number().int().nullable(),
+    })
+  }));
+
+  codingTool('scroll_mouse', 'Scroll the mouse wheel up, down, left, or right by a specified amount (ticks/clicks). If x and y are provided, moves mouse cursor to that position before scrolling; otherwise scrolls at current cursor position. If screenIndex is provided, x and y are relative to that display.', {
+    agentId: agentIdSchema,
+    screenIndex: z.number().int().min(0).optional(),
+    x: z.number().int().optional(),
+    y: z.number().int().optional(),
+    direction: z.enum(['up', 'down', 'left', 'right']).default('down'),
+    amount: z.number().int().min(1).default(1),
+    deltaY: z.number().int().optional(),
+    deltaX: z.number().int().optional(),
+  }, z.object({
+    result: z.object({
+      ok: z.literal(true),
+      direction: z.enum(['up', 'down', 'left', 'right']),
+      amount: z.number().int(),
+      x: z.number().int(),
+      y: z.number().int(),
+      screenIndex: z.number().int().nullable(),
+      relativeX: z.number().int().nullable(),
+      relativeY: z.number().int().nullable(),
+    })
+  }));
+
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
   npmTool('npm_run', 'Run one named npm script with `npm run <script>`. Extra arguments are passed to that script after `--`.', ({ args }) => { const values = Array.isArray(args) ? args.map(String) : []; const script = values.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); return ['run', script, ...(values.length ? ['--', ...values] : [])]; });
   npmTool('npm_install', 'Install npm dependencies with `npm install`. Extra arguments are passed directly to npm install.', ({ args }) => ['install', ...(Array.isArray(args) ? args.map(String) : [])]);

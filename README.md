@@ -52,6 +52,15 @@ Gradle is exposed as separate, fixed-task tools. Use `gradle_assemble_debug` for
 
 `rg`, `find_files`, and filesystem inspection do not require command execution. The npm tools, Gradle tools, `run_python`, `run_node`, the Git tools, `apply_patch`, and `kill_process` require `ALLOW_COMMAND_EXECUTION=true` on the Windows agent.
 
+### Screen / Mouse
+
+- `get_screen_info`
+- `take_screenshot`
+- `get_screen_pixel`
+- `click_mouse`
+- `move_mouse`
+- `scroll_mouse`
+
 ### Browser / CDP
 
 - `cdp_version`
@@ -135,6 +144,12 @@ TOOL GUIDANCE
 - cdp_list_targets: enumerate tabs/pages exposed by the local browser CDP endpoint.
 - cdp_call: invoke a CDP method on a selected target.
 - tail_file: inspect the end of application/log files.
+- get_screen_info: get monitor resolutions and display coordinates.
+- take_screenshot: capture screenshot of specified display or region.
+- get_screen_pixel: probe color of a pixel on screen.
+- click_mouse: click or double-click mouse at specified coordinates or current position.
+- move_mouse: move mouse cursor to specified coordinates.
+- scroll_mouse: scroll mouse wheel up, down, left, or right by specified amount.
 ```
 
 ## Repeatable coding-tool test

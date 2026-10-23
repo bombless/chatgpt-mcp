@@ -44,6 +44,8 @@ export type ToolName =
   | 'get_screen_info'
   | 'take_screenshot'
   | 'click_mouse'
+  | 'move_mouse'
+  | 'scroll_mouse'
   | 'get_screen_pixel'
   | 'npm_test'
   | 'npm_run'
