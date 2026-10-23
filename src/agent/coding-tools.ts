@@ -531,7 +531,7 @@ async function takeScreenshot(args: Record<string, unknown>) {
     let data: string;
     const mimeType = 'image/jpeg';
     if (process.platform === 'win32') {
-      const scriptPath = path.resolve(process.cwd(), 'scripts', 'test-screenshot-jpeg.ps1');
+      const scriptPath = path.resolve(process.cwd(), 'scripts', 'screen-capture.ps1');
       const psArgs = [
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
         '-X', String(captureX), '-Y', String(captureY),
