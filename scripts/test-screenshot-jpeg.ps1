@@ -11,10 +11,13 @@ $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @"
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Threading;
 using System.Runtime.InteropServices;
 
-public class DpiCaptureHelper {
+public class ScreenCapturer {
     [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int awareness);
     [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr OpenDesktop(string lpszDesktop, int dwFlags, bool fInherit, uint dwDesiredAccess);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetThreadDesktop(IntPtr hDesktop);
@@ -24,21 +27,23 @@ public class DpiCaptureHelper {
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
 
-    public static bool Capture(int x, int y, int width, int height, Bitmap targetBmp, out POINT cursor) {
+    public static string Capture(int x, int y, int width, int height, bool highlightCursor, out int curX, out int curY) {
+        try { SetProcessDpiAwareness(2); } catch {}
+
         POINT pt = new POINT();
-        bool ok = false;
+        Bitmap rawBmp = new Bitmap(width, height);
         Exception err = null;
+
         Thread t = new Thread(() => {
             IntPtr hDesk = OpenDesktop("default", 0, false, 0x01FF);
             if (hDesk != IntPtr.Zero) {
                 SetThreadDesktop(hDesk);
             }
             try {
-                using (Graphics g = Graphics.FromImage(targetBmp)) {
+                using (Graphics g = Graphics.FromImage(rawBmp)) {
                     g.CopyFromScreen(x, y, 0, 0, new Size(width, height));
                 }
                 GetCursorPos(out pt);
-                ok = true;
             } catch (Exception ex) {
                 err = ex;
             } finally {
@@ -47,18 +52,90 @@ public class DpiCaptureHelper {
         });
         t.Start();
         t.Join();
-        cursor = pt;
-        if (err != null) throw err;
-        return ok;
+
+        if (err != null) {
+            using (Graphics g = Graphics.FromImage(rawBmp)) {
+                g.CopyFromScreen(x, y, 0, 0, new Size(width, height));
+            }
+            GetCursorPos(out pt);
+        }
+
+        curX = pt.X;
+        curY = pt.Y;
+
+        double scale = Math.Min(1.0, Math.Min(1000.0 / width, 1000.0 / height));
+        int outW = Math.Max(1, (int)Math.Round(width * scale));
+        int outH = Math.Max(1, (int)Math.Round(height * scale));
+
+        using (Bitmap scaledBmp = new Bitmap(outW, outH)) {
+            using (Graphics g = Graphics.FromImage(scaledBmp)) {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.DrawImage(rawBmp, 0, 0, outW, outH);
+
+                if (highlightCursor && pt.X >= x && pt.X < x + width && pt.Y >= y && pt.Y < y + height) {
+                    float cx = (float)((pt.X - x) * scale);
+                    float cy = (float)((pt.Y - y) * scale);
+
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(90, 255, 60, 60))) {
+                        g.FillEllipse(b, cx - 22, cy - 22, 44, 44);
+                    }
+                    using (Pen p = new Pen(Color.FromArgb(230, 220, 38, 38), 2.5f)) {
+                        g.DrawEllipse(p, cx - 18, cy - 18, 36, 36);
+                    }
+                    using (Pen p = new Pen(Color.FromArgb(230, 255, 255, 255), 1.5f)) {
+                        g.DrawEllipse(p, cx - 12, cy - 12, 24, 24);
+                    }
+                    using (Pen p = new Pen(Color.FromArgb(240, 220, 38, 38), 2.0f)) {
+                        g.DrawLine(p, cx, cy - 25, cx, cy - 14);
+                        g.DrawLine(p, cx, cy + 14, cx, cy + 25);
+                        g.DrawLine(p, cx - 25, cy, cx - 14, cy);
+                        g.DrawLine(p, cx + 14, cy, cx + 25, cy);
+                    }
+                    PointF[] arrow = new PointF[] {
+                        new PointF(cx, cy),
+                        new PointF(cx, cy + 17),
+                        new PointF(cx + 4.5f, cy + 13),
+                        new PointF(cx + 9, cy + 21),
+                        new PointF(cx + 12, cy + 19.5f),
+                        new PointF(cx + 7.5f, cy + 12),
+                        new PointF(cx + 13.5f, cy + 12)
+                    };
+                    using (SolidBrush b = new SolidBrush(Color.White)) {
+                        g.FillPolygon(b, arrow);
+                    }
+                    using (Pen p = new Pen(Color.FromArgb(255, 20, 20, 20), 1.5f)) {
+                        g.DrawPolygon(p, arrow);
+                    }
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(255, 220, 38, 38))) {
+                        g.FillEllipse(b, cx - 2, cy - 2, 4, 4);
+                    }
+                }
+            }
+            rawBmp.Dispose();
+
+            ImageCodecInfo jpegCodec = null;
+            foreach (var codec in ImageCodecInfo.GetImageEncoders()) {
+                if (codec.MimeType == "image/jpeg") {
+                    jpegCodec = codec;
+                    break;
+                }
+            }
+            if (jpegCodec == null) throw new Exception("JPEG codec not found");
+
+            using (MemoryStream ms = new MemoryStream()) {
+                using (EncoderParameters ep = new EncoderParameters(1)) {
+                    ep.Param[0] = new EncoderParameter(Encoder.Quality, 82L);
+                    scaledBmp.Save(ms, jpegCodec, ep);
+                }
+                return Convert.ToBase64String(ms.ToArray());
+            }
+        }
     }
 }
-"@ -ReferencedAssemblies System.Drawing
-
-try { [void][DpiCaptureHelper]::SetProcessDpiAwareness(2) } catch {}
+"@ -ReferencedAssemblies System.Drawing, System.Windows.Forms
 
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen
 $bounds = $screen.Bounds
 
@@ -74,96 +151,9 @@ if ($null -ne $X -and $null -ne $Y -and $CaptureWidth -gt 0 -and $CaptureHeight 
     $sourceHeight = $bounds.Height
 }
 
-$bmp = New-Object System.Drawing.Bitmap($sourceWidth, $sourceHeight)
-$cursor = New-Object DpiCaptureHelper+POINT
+[int]$cursorX = 0
+[int]$cursorY = 0
+$base64 = [ScreenCapturer]::Capture($captureX, $captureY, $sourceWidth, $sourceHeight, [bool]$HighlightCursor, [ref]$cursorX, [ref]$cursorY)
 
-try {
-    [void][DpiCaptureHelper]::Capture($captureX, $captureY, $sourceWidth, $sourceHeight, $bmp, [ref]$cursor)
-} catch {
-    $graphics = [System.Drawing.Graphics]::FromImage($bmp)
-    $graphics.CopyFromScreen($captureX, $captureY, 0, 0, $bmp.Size)
-    $graphics.Dispose()
-    $cursor.X = [System.Windows.Forms.Cursor]::Position.X
-    $cursor.Y = [System.Windows.Forms.Cursor]::Position.Y
-}
-
-$scale = [Math]::Min(1.0, [Math]::Min(1000.0 / $bmp.Width, 1000.0 / $bmp.Height))
-$width = [Math]::Max(1, [int][Math]::Round($bmp.Width * $scale))
-$height = [Math]::Max(1, [int][Math]::Round($bmp.Height * $scale))
-
-$dst = New-Object System.Drawing.Bitmap($width, $height)
-$dstGraphics = [System.Drawing.Graphics]::FromImage($dst)
-$dstGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-$dstGraphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$dstGraphics.DrawImage($bmp, 0, 0, $width, $height)
-
-if ($HighlightCursor) {
-    if ($cursor.X -ge $captureX -and $cursor.X -lt ($captureX + $sourceWidth) -and
-        $cursor.Y -ge $captureY -and $cursor.Y -lt ($captureY + $sourceHeight)) {
-        $cx = [float](($cursor.X - $captureX) * $scale)
-        $cy = [float](($cursor.Y - $captureY) * $scale)
-
-        $haloBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(90, 255, 60, 60))
-        $dstGraphics.FillEllipse($haloBrush, $cx - 22, $cy - 22, 44, 44)
-        $haloBrush.Dispose()
-
-        $redPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(230, 220, 38, 38), 2.5)
-        $dstGraphics.DrawEllipse($redPen, $cx - 18, $cy - 18, 36, 36)
-        $redPen.Dispose()
-
-        $whitePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(230, 255, 255, 255), 1.5)
-        $dstGraphics.DrawEllipse($whitePen, $cx - 12, $cy - 12, 24, 24)
-        $whitePen.Dispose()
-
-        $crossPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(240, 220, 38, 38), 2.0)
-        $dstGraphics.DrawLine($crossPen, $cx, $cy - 25, $cx, $cy - 14)
-        $dstGraphics.DrawLine($crossPen, $cx, $cy + 14, $cx, $cy + 25)
-        $dstGraphics.DrawLine($crossPen, $cx - 25, $cy, $cx - 14, $cy)
-        $dstGraphics.DrawLine($crossPen, $cx + 14, $cy, $cx + 25, $cy)
-        $crossPen.Dispose()
-
-        $arrowPoints = @(
-            [System.Drawing.PointF]::new($cx, $cy),
-            [System.Drawing.PointF]::new($cx, $cy + 17),
-            [System.Drawing.PointF]::new($cx + 4.5, $cy + 13),
-            [System.Drawing.PointF]::new($cx + 9, $cy + 21),
-            [System.Drawing.PointF]::new($cx + 12, $cy + 19.5),
-            [System.Drawing.PointF]::new($cx + 7.5, $cy + 12),
-            [System.Drawing.PointF]::new($cx + 13.5, $cy + 12)
-        )
-        $arrowBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 255, 255, 255))
-        $dstGraphics.FillPolygon($arrowBrush, $arrowPoints)
-        $arrowBrush.Dispose()
-
-        $arrowPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 20, 20, 20), 1.5)
-        $dstGraphics.DrawPolygon($arrowPen, $arrowPoints)
-        $arrowPen.Dispose()
-
-        $dotBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 220, 38, 38))
-        $dstGraphics.FillEllipse($dotBrush, $cx - 2, $cy - 2, 4, 4)
-        $dotBrush.Dispose()
-    }
-}
-
-$stream = New-Object System.IO.MemoryStream
-$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
-if ($null -eq $codec) { throw 'JPEG encoder not found' }
-
-$encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
-try {
-    $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]82)
-    $dst.Save($stream, $codec, $encoderParams)
-} finally {
-    $encoderParams.Dispose()
-}
-
-$bytes = $stream.ToArray()
-$base64 = [Convert]::ToBase64String($bytes)
-
-Write-Output "SCREENSHOT_CURSOR:{`"x`":$($cursor.X),`"y`":$($cursor.Y)}"
+Write-Output "SCREENSHOT_CURSOR:{`"x`":$cursorX,`"y`":$cursorY}"
 Write-Output "SCREENSHOT_BASE64:$base64"
-
-$stream.Dispose()
-$dstGraphics.Dispose()
-$dst.Dispose()
-$bmp.Dispose()
