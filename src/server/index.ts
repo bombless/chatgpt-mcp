@@ -209,7 +209,7 @@ function buildMcpServer() {
     })
   }));
 
-  codingTool('scroll_mouse', 'Scroll the mouse wheel up, down, left, or right by a specified amount (ticks/clicks). If x and y are provided, moves mouse cursor to that position before scrolling; otherwise scrolls at current cursor position. If screenIndex is provided, x and y are relative to that display.', {
+  codingTool('scroll_mouse', 'Scroll the mouse wheel up, down, left, or right by a specified amount (ticks/clicks). IMPORTANT: Before scrolling a page, list, table, or panel, inspect the latest screenshot and move the pointer to a point INSIDE the intended scrollable content (for example, over a list item, not the header, blank margin, or another window), then scroll using explicit x, y, and screenIndex. Do not assume scrolling worked: take another screenshot and verify the target content moved; if it did not, try a different point inside the content or a smaller scroll amount, then verify again. If x and y are provided, moves the cursor there before scrolling; otherwise scrolls at the current cursor position. If screenIndex is provided, x and y are relative to that display.', {
     agentId: agentIdSchema,
     screenIndex: z.number().int().min(0).optional(),
     x: z.number().int().optional(),
