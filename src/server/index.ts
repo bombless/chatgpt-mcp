@@ -10,6 +10,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
+import { isValidAgentId } from '../shared/agent-id.js';
 import { approve, authorizationPage, exchangeToken, getBaseUrl, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
@@ -370,7 +371,7 @@ wss.on('connection', ws => {
     try {
       const message = JSON.parse(raw.toString()) as AgentMessage;
       if (message.type === 'hello') {
-        if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId');
+        if (!isValidAgentId(message.agentId)) return ws.close(4002, 'invalid agentId');
         agentId = message.agentId;
         initialized = true;
         registry.add(agentId, ws);
