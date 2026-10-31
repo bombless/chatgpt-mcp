@@ -25,6 +25,21 @@ test('read_image_file returns PNG bytes and MIME type', async () => {
   }
 });
 
+test('read_image_file identifies JPEG bytes by signature', async () => {
+  const directory = path.join(workspace, '.image-file-tests');
+  await fs.mkdir(directory, { recursive: true });
+  const file = path.join(directory, 'fixture.dat');
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  try {
+    await fs.writeFile(file, bytes);
+    const result = await runCodingTool('read_image_file', { path: file }) as any;
+    assert.equal(result.mimeType, 'image/jpeg');
+    assert.equal(Buffer.from(result.data, 'base64').compare(bytes), 0);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('read_image_file rejects non-absolute paths and unsupported formats', async () => {
   await assert.rejects(() => runCodingTool('read_image_file', { path: 'relative.png' }), /absolute file path/);
   const directory = path.join(workspace, '.image-file-tests');
