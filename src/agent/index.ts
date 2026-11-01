@@ -9,7 +9,7 @@ import type {
   AgentResponse,
   ToolName
 } from '../shared/protocol.js'
-import { runCodingTool } from './coding-tools.js'
+import { runCodingTool, setCommandExecutionEnabled } from './coding-tools.js'
 import keytar from 'keytar'
 
 async function getConfig () {
@@ -35,6 +35,7 @@ getConfig().then(config => {
   const AGENT_VERSION = '0.2.0'
   const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000)
   const ALLOW_COMMAND_EXECUTION = config.allowCommandExecution === 'true'
+  setCommandExecutionEnabled(ALLOW_COMMAND_EXECUTION)
   const IS_WINDOWS = process.platform === 'win32'
   const IS_LINUX = process.platform === 'linux'
 

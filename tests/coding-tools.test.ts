@@ -8,7 +8,12 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), 'chatgpt-mcp-coding-'));
 process.env.AGENT_WORKSPACE = root;
 process.env.ALLOW_COMMAND_EXECUTION = 'true';
 
-const { runCodingTool } = await import('../src/agent/coding-tools.js');
+const { runCodingTool, setCommandExecutionEnabled } = await import('../src/agent/coding-tools.js');
+
+// The resolved secure configuration must override the module's environment default.
+setCommandExecutionEnabled(false);
+await assert.rejects(() => runCodingTool('run_node', { args: ['-e', 'console.log(1)'] }), /Command execution is disabled/);
+setCommandExecutionEnabled(true);
 
 const call = (tool: string, args: Record<string, unknown> = {}) => runCodingTool(tool, args);
 const file = path.join(root, 'sample.txt');

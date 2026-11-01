@@ -9,7 +9,12 @@ const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
 const MAX_SEARCH_RESULTS = Number(process.env.MAX_SEARCH_RESULTS ?? 500);
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS ?? 120_000);
-const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
+let allowCommandExecution = process.env.ALLOW_COMMAND_EXECUTION === 'true';
+
+/** Set the resolved agent permission (environment or secure configuration). */
+export function setCommandExecutionEnabled(enabled: boolean): void {
+  allowCommandExecution = enabled;
+}
 const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (process.platform === 'linux' ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
 
 type CommandLogger = (command: string, cwd?: string) => void;
@@ -73,6 +78,32 @@ export function getProxyInfo(env: NodeJS.ProcessEnv = process.env): ProxyInfo {
   const all = safeProxyUrl(values.get('all_proxy'));
   const noProxy = values.get('no_proxy')?.trim() || null;
   return { configured: Boolean(http || https || all), proxies: { http, https, all }, noProxy };
+}
+
+async function readImageFile(args: Record<string, unknown>) {
+  const requestedPath = stringArg(args, 'path');
+  if (!path.isAbsolute(requestedPath)) throw new Error('path must be an absolute file path');
+  const file = assertAllowed(await fs.realpath(requestedPath));
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) throw new Error(`Path is not a regular file: ${file}`);
+  const maxBytes = 20 * 1024 * 1024;
+  if (stat.size > maxBytes) throw new Error(`Image exceeds the 20 MiB size limit: ${stat.size} bytes`);
+  const bytes = await fs.readFile(file);
+  let mimeType: 'image/jpeg' | 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    mimeType = 'image/jpeg';
+  } else if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    mimeType = 'image/png';
+  } else {
+    throw new Error('Unsupported image format: only JPEG and PNG files are supported');
+  }
+  return {
+    path: file,
+    mimeType,
+    data: bytes.toString('base64'),
+    dataBytes: bytes.length,
+    dataSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
 }
 
 function stringArg(args: Record<string, unknown>, name: string): string {
@@ -163,7 +194,7 @@ async function exec(command: string, args: string[], cwd?: string, timeout = COM
 }
 
 function requireCommandExecution() {
-  if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
+  if (!allowCommandExecution) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
 }
 
 function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
@@ -906,6 +937,7 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
   switch (tool) {
     case 'get_screen_info': return getScreenInfo();
     case 'take_screenshot': return takeScreenshot(args);
+    case 'read_image_file': return readImageFile(args);
     case 'click_mouse': return clickMouse(args);
     case 'move_mouse': return moveMouse(args);
     case 'scroll_mouse': return scrollMouse(args);
