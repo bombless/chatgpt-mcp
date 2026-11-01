@@ -107,6 +107,35 @@ function buildMcpServer() {
   );
   server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
 
+  server.registerTool('read_image_file', {
+    description: 'Read a JPEG or PNG image from an absolute path on the connected agent and return it as a native MCP image block. The resolved file must be inside AGENT_WORKSPACE; maximum size is 20 MiB.',
+    inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }),
+  }, async ({ agentId, path: imagePath, intent }) => {
+    try {
+      const image = await registry.call(agentId, 'read_image_file', { path: imagePath, intent }) as {
+        path: string; mimeType: string; data: string; dataBytes: number; dataSha256: string;
+      };
+      if (!image || !image.data || !['image/jpeg', 'image/png'].includes(image.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(image.data)) {
+        throw new Error('Agent returned invalid image data');
+      }
+      const bytes = Buffer.from(image.data, 'base64');
+      if (bytes.length !== image.dataBytes || bytes.length > 20 * 1024 * 1024) throw new Error('Image byte length is invalid or exceeds 20 MiB');
+      const validJpeg = image.mimeType === 'image/jpeg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+      const validPng = image.mimeType === 'image/png' && bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      if (!validJpeg && !validPng) throw new Error('Image content does not match its declared JPEG/PNG MIME type');
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== image.dataSha256) throw new Error('Image SHA-256 mismatch');
+      return { content: [
+        { type: 'text' as const, text: JSON.stringify({ path: image.path, mimeType: image.mimeType, dataBytes: image.dataBytes, dataSha256: digest }, null, 2) },
+        { type: 'image' as const, data: image.data, mimeType: image.mimeType },
+      ] };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'read_image_file', message });
+      throw new Error(`read_image_file failed: ${message}`);
+    }
+  });
+
   server.registerTool('get_screen_info', {
     description: 'List every attached display/monitor, including stable index, device name, bounds, resolution, primary status, and virtual desktop coordinates.',
     inputSchema: input({ agentId: agentIdSchema }),

@@ -43,6 +43,7 @@ export type ToolName =
   | 'get_system_info'
   | 'get_screen_info'
   | 'take_screenshot'
+  | 'read_image_file'
   | 'click_mouse'
   | 'move_mouse'
   | 'scroll_mouse'

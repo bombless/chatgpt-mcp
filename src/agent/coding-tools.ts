@@ -80,6 +80,32 @@ export function getProxyInfo(env: NodeJS.ProcessEnv = process.env): ProxyInfo {
   return { configured: Boolean(http || https || all), proxies: { http, https, all }, noProxy };
 }
 
+async function readImageFile(args: Record<string, unknown>) {
+  const requestedPath = stringArg(args, 'path');
+  if (!path.isAbsolute(requestedPath)) throw new Error('path must be an absolute file path');
+  const file = assertAllowed(await fs.realpath(requestedPath));
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) throw new Error(`Path is not a regular file: ${file}`);
+  const maxBytes = 20 * 1024 * 1024;
+  if (stat.size > maxBytes) throw new Error(`Image exceeds the 20 MiB size limit: ${stat.size} bytes`);
+  const bytes = await fs.readFile(file);
+  let mimeType: 'image/jpeg' | 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    mimeType = 'image/jpeg';
+  } else if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    mimeType = 'image/png';
+  } else {
+    throw new Error('Unsupported image format: only JPEG and PNG files are supported');
+  }
+  return {
+    path: file,
+    mimeType,
+    data: bytes.toString('base64'),
+    dataBytes: bytes.length,
+    dataSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
+}
+
 function stringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   if (typeof value !== 'string' || !value) throw new Error(`${name} must be a non-empty string`);
@@ -911,6 +937,7 @@ export async function runCodingTool(tool: string, args: Record<string, unknown>,
   switch (tool) {
     case 'get_screen_info': return getScreenInfo();
     case 'take_screenshot': return takeScreenshot(args);
+    case 'read_image_file': return readImageFile(args);
     case 'click_mouse': return clickMouse(args);
     case 'move_mouse': return moveMouse(args);
     case 'scroll_mouse': return scrollMouse(args);
