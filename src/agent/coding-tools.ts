@@ -9,7 +9,12 @@ const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000);
 const MAX_SEARCH_RESULTS = Number(process.env.MAX_SEARCH_RESULTS ?? 500);
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS ?? 120_000);
-const ALLOW_COMMAND_EXECUTION = process.env.ALLOW_COMMAND_EXECUTION === 'true';
+let allowCommandExecution = process.env.ALLOW_COMMAND_EXECUTION === 'true';
+
+/** Set the resolved agent permission (environment or secure configuration). */
+export function setCommandExecutionEnabled(enabled: boolean): void {
+  allowCommandExecution = enabled;
+}
 const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (process.platform === 'linux' ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
 
 type CommandLogger = (command: string, cwd?: string) => void;
@@ -73,6 +78,32 @@ export function getProxyInfo(env: NodeJS.ProcessEnv = process.env): ProxyInfo {
   const all = safeProxyUrl(values.get('all_proxy'));
   const noProxy = values.get('no_proxy')?.trim() || null;
   return { configured: Boolean(http || https || all), proxies: { http, https, all }, noProxy };
+}
+
+async function readImageFile(args: Record<string, unknown>) {
+  const requestedPath = stringArg(args, 'path');
+  if (!path.isAbsolute(requestedPath)) throw new Error('path must be an absolute file path');
+  const file = assertAllowed(await fs.realpath(requestedPath));
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) throw new Error(`Path is not a regular file: ${file}`);
+  const maxBytes = 20 * 1024 * 1024;
+  if (stat.size > maxBytes) throw new Error(`Image exceeds the 20 MiB size limit: ${stat.size} bytes`);
+  const bytes = await fs.readFile(file);
+  let mimeType: 'image/jpeg' | 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    mimeType = 'image/jpeg';
+  } else if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    mimeType = 'image/png';
+  } else {
+    throw new Error('Unsupported image format: only JPEG and PNG files are supported');
+  }
+  return {
+    path: file,
+    mimeType,
+    data: bytes.toString('base64'),
+    dataBytes: bytes.length,
+    dataSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
 }
 
 function stringArg(args: Record<string, unknown>, name: string): string {
@@ -163,7 +194,7 @@ async function exec(command: string, args: string[], cwd?: string, timeout = COM
 }
 
 function requireCommandExecution() {
-  if (!ALLOW_COMMAND_EXECUTION) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
+  if (!allowCommandExecution) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
 }
 
 function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {
@@ -492,8 +523,23 @@ async function getScreenPixel(args: Record<string, unknown>) {
   return { screenIndex: screen.index, deviceName: screen.deviceName, x, y, absoluteX, absoluteY, ...rgb, hex, format: 'RGB 8-bit/channel', note: 'Coordinates x/y are relative to the selected display; absoluteX/absoluteY are virtual-desktop coordinates.' };
 }
 
+async function getCursorPositionLinux(): Promise<{ x: number; y: number } | null> {
+  try {
+    const { stdout } = await execFileAsync('xdotool', ['getmouselocation', '--shell'], { timeout: 5000 });
+    const matchX = stdout.match(/^X=(\d+)/mu);
+    const matchY = stdout.match(/^Y=(\d+)/mu);
+    if (matchX && matchY) {
+      return { x: Number(matchX[1]), y: Number(matchY[1]) };
+    }
+  } catch {
+    // xdotool not available
+  }
+  return null;
+}
+
 async function takeScreenshot(args: Record<string, unknown>) {
   const info = await getScreenInfo();
+  const highlightCursor = Boolean(args.highlightCursor ?? args.highlightMouse);
   const hasCrop = ['x', 'y', 'width', 'height'].some(key => args[key] !== undefined);
   if (hasCrop && (args.screenIndex === undefined || !['x', 'y', 'width', 'height'].every(key => args[key] !== undefined))) {
     throw new Error('A cropped screenshot requires screenIndex plus all four values: x, y, width, height (x/y are zero-based display-relative coordinates).');
@@ -501,6 +547,7 @@ async function takeScreenshot(args: Record<string, unknown>) {
   const wanted = args.screenIndex === undefined ? info.screens : info.screens.filter(s => s.index === Number(args.screenIndex));
   if (!wanted.length) throw new Error(`No display found for screenIndex=${String(args.screenIndex)}`);
   if (hasCrop && wanted.length !== 1) throw new Error('A cropped screenshot must target exactly one display.');
+  let globalCursor: { x: number; y: number } | null = null;
   const screens = [];
   for (const screen of wanted) {
     const cropX = hasCrop ? Number(args.x) : 0;
@@ -515,16 +562,32 @@ async function takeScreenshot(args: Record<string, unknown>) {
     let data: string;
     const mimeType = 'image/jpeg';
     if (process.platform === 'win32') {
-      const scriptPath = path.resolve(process.cwd(), 'scripts', 'test-screenshot-jpeg.ps1');
-      const { stdout } = await execFileAsync('powershell.exe', [
+      const scriptPath = path.resolve(process.cwd(), 'scripts', 'screen-capture.ps1');
+      const psArgs = [
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
         '-X', String(captureX), '-Y', String(captureY),
         '-CaptureWidth', String(captureWidth), '-CaptureHeight', String(captureHeight),
-      ], { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 100_000_000) });
+      ];
+      if (highlightCursor) {
+        psArgs.push('-HighlightCursor');
+      }
+      const { stdout } = await execFileAsync('powershell.exe', psArgs, { windowsHide: true, timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 100_000_000) });
       const match = stdout.match(/^SCREENSHOT_BASE64:([A-Za-z0-9+/]+={0,2})$/mu);
       if (!match) throw new Error('PowerShell screenshot script did not return a valid Base64 payload');
       data = match[1];
+
+      const cursorMatch = stdout.match(/^SCREENSHOT_CURSOR:(\{"x":-?\d+,"y":-?\d+\})$/mu);
+      if (cursorMatch && !globalCursor) {
+        try {
+          globalCursor = JSON.parse(cursorMatch[1]);
+        } catch {
+          // ignore
+        }
+      }
     } else if (process.platform === 'linux') {
+      if (!globalCursor) {
+        globalCursor = await getCursorPositionLinux();
+      }
       const minX = Math.min(...info.screens.map(s => s.x));
       const minY = Math.min(...info.screens.map(s => s.y));
       const { stdout } = await execFileAsync('import', ['-window', 'root', '-crop', `${captureWidth}x${captureHeight}+${captureX - minX}+${captureY - minY}`, '+repage', '-resize', '1000x1000>', '-quality', '82', 'jpeg:-'], { encoding: 'buffer', timeout: 30000, maxBuffer: Math.max(MAX_OUTPUT_BYTES, 20_000_000) }) as any;
@@ -540,13 +603,344 @@ async function takeScreenshot(args: Record<string, unknown>) {
     console.log(`[agent][screenshot] captured display=${screen.index} region=${cropX},${cropY},${captureWidth}x${captureHeight} output=${outputWidth}x${outputHeight} bytes=${imageBytes.length} sha256=${dataSha256}`);
     screens.push({ ...screen, x: captureX, y: captureY, width: outputWidth, height: outputHeight, captureX: cropX, captureY: cropY, captureWidth, captureHeight, mimeType, data, dataBytes: imageBytes.length, dataSha256 });
   }
-  return { screens };
+
+  let cursorInfo: { x: number; y: number; screenIndex: number | null; relativeX: number | null; relativeY: number | null } | null = null;
+  if (globalCursor) {
+    const activeScreen = info.screens.find(s =>
+      globalCursor!.x >= s.x &&
+      globalCursor!.x < s.x + s.width &&
+      globalCursor!.y >= s.y &&
+      globalCursor!.y < s.y + s.height
+    ) ?? null;
+
+    cursorInfo = {
+      x: globalCursor.x,
+      y: globalCursor.y,
+      screenIndex: activeScreen ? activeScreen.index : null,
+      relativeX: activeScreen ? globalCursor.x - activeScreen.x : null,
+      relativeY: activeScreen ? globalCursor.y - activeScreen.y : null,
+    };
+  }
+
+  return { cursor: cursorInfo, screens };
+}
+
+async function clickMouse(args: Record<string, unknown>) {
+  const info = await getScreenInfo();
+  const button = typeof args.button === 'string' && ['left', 'right', 'middle'].includes(args.button)
+    ? args.button
+    : 'left';
+  const doubleClick = Boolean(args.doubleClick);
+  const clickCount = doubleClick ? 2 : (Number.isInteger(Number(args.clickCount)) && Number(args.clickCount) > 0 ? Number(args.clickCount) : 1);
+
+  let targetX: number | null = null;
+  let targetY: number | null = null;
+
+  const hasX = args.x !== undefined;
+  const hasY = args.y !== undefined;
+  if (hasX !== hasY) {
+    throw new Error('Both x and y must be provided, or both omitted to click at current mouse position.');
+  }
+
+  if (args.screenIndex !== undefined) {
+    const screenIndex = Number(args.screenIndex);
+    const screen = info.screens.find(s => s.index === screenIndex);
+    if (!screen) throw new Error(`No display found for screenIndex=${String(args.screenIndex)}`);
+    if (hasX && hasY) {
+      const x = Number(args.x);
+      const y = Number(args.y);
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= screen.width || y >= screen.height) {
+        throw new Error(`Coordinates x=${x}, y=${y} must be within display ${screen.index} bounds: x=0..${screen.width - 1}, y=0..${screen.height - 1}`);
+      }
+      targetX = screen.x + x;
+      targetY = screen.y + y;
+    }
+  } else if (hasX && hasY) {
+    const x = Number(args.x);
+    const y = Number(args.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
+      throw new Error('x and y coordinates must be integers.');
+    }
+    targetX = x;
+    targetY = y;
+  }
+
+  let finalX: number;
+  let finalY: number;
+
+  if (process.platform === 'win32') {
+    const scriptPath = path.resolve(process.cwd(), 'scripts', 'click-mouse.ps1');
+    const psArgs = [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
+      '-Button', button,
+      '-ClickCount', String(clickCount),
+    ];
+    if (targetX !== null && targetY !== null) {
+      psArgs.push('-X', String(targetX), '-Y', String(targetY));
+    }
+    const { stdout } = await execFileAsync('powershell.exe', psArgs, {
+      windowsHide: true,
+      timeout: 15000,
+      maxBuffer: MAX_OUTPUT_BYTES,
+    });
+    const match = stdout.match(/^CLICK_RESULT:(\{.*?\})$/mu);
+    if (!match) throw new Error(`PowerShell mouse click script failed: ${stdout.trim()}`);
+    const result = JSON.parse(match[1]);
+    finalX = Number(result.x);
+    finalY = Number(result.y);
+  } else if (process.platform === 'linux') {
+    const buttonNum = button === 'right' ? '3' : button === 'middle' ? '2' : '1';
+    if (targetX !== null && targetY !== null) {
+      const xdotoolArgs = ['mousemove', String(targetX), String(targetY), 'click'];
+      if (clickCount > 1) xdotoolArgs.push('--repeat', String(clickCount), '--delay', '60');
+      xdotoolArgs.push(buttonNum);
+      await execFileAsync('xdotool', xdotoolArgs, { timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+      finalX = targetX;
+      finalY = targetY;
+    } else {
+      const xdotoolArgs = ['click'];
+      if (clickCount > 1) xdotoolArgs.push('--repeat', String(clickCount), '--delay', '60');
+      xdotoolArgs.push(buttonNum);
+      await execFileAsync('xdotool', xdotoolArgs, { timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+      const cur = await getCursorPositionLinux();
+      finalX = cur?.x ?? 0;
+      finalY = cur?.y ?? 0;
+    }
+  } else {
+    throw new Error('Mouse clicking is supported on Windows and Linux/X11 only.');
+  }
+
+  const activeScreen = info.screens.find(s =>
+    finalX >= s.x && finalX < s.x + s.width &&
+    finalY >= s.y && finalY < s.y + s.height
+  ) ?? null;
+
+  return {
+    ok: true,
+    button,
+    clickCount,
+    x: finalX,
+    y: finalY,
+    screenIndex: activeScreen ? activeScreen.index : null,
+    relativeX: activeScreen ? finalX - activeScreen.x : null,
+    relativeY: activeScreen ? finalY - activeScreen.y : null,
+  };
+}
+
+async function moveMouse(args: Record<string, unknown>) {
+  const info = await getScreenInfo();
+
+  const hasX = args.x !== undefined;
+  const hasY = args.y !== undefined;
+  if (!hasX || !hasY) {
+    throw new Error('Both x and y must be provided to move the mouse cursor.');
+  }
+
+  let targetX: number;
+  let targetY: number;
+
+  if (args.screenIndex !== undefined) {
+    const screenIndex = Number(args.screenIndex);
+    const screen = info.screens.find(s => s.index === screenIndex);
+    if (!screen) throw new Error(`No display found for screenIndex=${String(args.screenIndex)}`);
+    const x = Number(args.x);
+    const y = Number(args.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= screen.width || y >= screen.height) {
+      throw new Error(`Coordinates x=${x}, y=${y} must be within display ${screen.index} bounds: x=0..${screen.width - 1}, y=0..${screen.height - 1}`);
+    }
+    targetX = screen.x + x;
+    targetY = screen.y + y;
+  } else {
+    const x = Number(args.x);
+    const y = Number(args.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
+      throw new Error('x and y coordinates must be integers.');
+    }
+    targetX = x;
+    targetY = y;
+  }
+
+  let finalX: number;
+  let finalY: number;
+
+  if (process.platform === 'win32') {
+    const scriptPath = path.resolve(process.cwd(), 'scripts', 'move-mouse.ps1');
+    const psArgs = [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
+      '-X', String(targetX),
+      '-Y', String(targetY),
+    ];
+    const { stdout } = await execFileAsync('powershell.exe', psArgs, {
+      windowsHide: true,
+      timeout: 15000,
+      maxBuffer: MAX_OUTPUT_BYTES,
+    });
+    const match = stdout.match(/^MOVE_RESULT:(\{.*?\})$/mu);
+    if (!match) throw new Error(`PowerShell mouse move script failed: ${stdout.trim()}`);
+    const result = JSON.parse(match[1]);
+    finalX = Number(result.x);
+    finalY = Number(result.y);
+  } else if (process.platform === 'linux') {
+    await execFileAsync('xdotool', ['mousemove', String(targetX), String(targetY)], { timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+    finalX = targetX;
+    finalY = targetY;
+  } else {
+    throw new Error('Mouse moving is supported on Windows and Linux/X11 only.');
+  }
+
+  const activeScreen = info.screens.find(s =>
+    finalX >= s.x && finalX < s.x + s.width &&
+    finalY >= s.y && finalY < s.y + s.height
+  ) ?? null;
+
+  return {
+    ok: true,
+    x: finalX,
+    y: finalY,
+    screenIndex: activeScreen ? activeScreen.index : null,
+    relativeX: activeScreen ? finalX - activeScreen.x : null,
+    relativeY: activeScreen ? finalY - activeScreen.y : null,
+  };
+}
+
+async function scrollMouse(args: Record<string, unknown>) {
+  const info = await getScreenInfo();
+
+  let direction = typeof args.direction === 'string' && ['up', 'down', 'left', 'right'].includes(args.direction.toLowerCase())
+    ? (args.direction.toLowerCase() as 'up' | 'down' | 'left' | 'right')
+    : 'down';
+  let amount = Number.isInteger(Number(args.amount)) && Number(args.amount) > 0
+    ? Number(args.amount)
+    : 1;
+
+  if (args.deltaY !== undefined) {
+    const dy = Number(args.deltaY);
+    if (!Number.isInteger(dy)) {
+      throw new Error('deltaY must be an integer.');
+    }
+    if (dy < 0) {
+      direction = 'up';
+      amount = Math.abs(dy);
+    } else if (dy > 0) {
+      direction = 'down';
+      amount = dy;
+    }
+  } else if (args.deltaX !== undefined) {
+    const dx = Number(args.deltaX);
+    if (!Number.isInteger(dx)) {
+      throw new Error('deltaX must be an integer.');
+    }
+    if (dx < 0) {
+      direction = 'left';
+      amount = Math.abs(dx);
+    } else if (dx > 0) {
+      direction = 'right';
+      amount = dx;
+    }
+  }
+
+  let targetX: number | null = null;
+  let targetY: number | null = null;
+
+  const hasX = args.x !== undefined;
+  const hasY = args.y !== undefined;
+  if (hasX !== hasY) {
+    throw new Error('Both x and y must be provided, or both omitted to scroll at current mouse position.');
+  }
+
+  if (args.screenIndex !== undefined) {
+    const screenIndex = Number(args.screenIndex);
+    const screen = info.screens.find(s => s.index === screenIndex);
+    if (!screen) throw new Error(`No display found for screenIndex=${String(args.screenIndex)}`);
+    if (hasX && hasY) {
+      const x = Number(args.x);
+      const y = Number(args.y);
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= screen.width || y >= screen.height) {
+        throw new Error(`Coordinates x=${x}, y=${y} must be within display ${screen.index} bounds: x=0..${screen.width - 1}, y=0..${screen.height - 1}`);
+      }
+      targetX = screen.x + x;
+      targetY = screen.y + y;
+    }
+  } else if (hasX && hasY) {
+    const x = Number(args.x);
+    const y = Number(args.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) {
+      throw new Error('x and y coordinates must be integers.');
+    }
+    targetX = x;
+    targetY = y;
+  }
+
+  let finalX: number;
+  let finalY: number;
+
+  if (process.platform === 'win32') {
+    const scriptPath = path.resolve(process.cwd(), 'scripts', 'scroll-mouse.ps1');
+    const psArgs = [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath,
+      '-Direction', direction,
+      '-Amount', String(amount),
+    ];
+    if (targetX !== null && targetY !== null) {
+      psArgs.push('-X', String(targetX), '-Y', String(targetY));
+    }
+    const { stdout } = await execFileAsync('powershell.exe', psArgs, {
+      windowsHide: true,
+      timeout: 15000,
+      maxBuffer: MAX_OUTPUT_BYTES,
+    });
+    const match = stdout.match(/^SCROLL_RESULT:(\{.*?\})$/mu);
+    if (!match) throw new Error(`PowerShell mouse scroll script failed: ${stdout.trim()}`);
+    const result = JSON.parse(match[1]);
+    finalX = Number(result.x);
+    finalY = Number(result.y);
+  } else if (process.platform === 'linux') {
+    const buttonNum = direction === 'up' ? '4' : direction === 'down' ? '5' : direction === 'left' ? '6' : '7';
+    if (targetX !== null && targetY !== null) {
+      const xdotoolArgs = ['mousemove', String(targetX), String(targetY), 'click'];
+      if (amount > 1) xdotoolArgs.push('--repeat', String(amount), '--delay', '20');
+      xdotoolArgs.push(buttonNum);
+      await execFileAsync('xdotool', xdotoolArgs, { timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+      finalX = targetX;
+      finalY = targetY;
+    } else {
+      const xdotoolArgs = ['click'];
+      if (amount > 1) xdotoolArgs.push('--repeat', String(amount), '--delay', '20');
+      xdotoolArgs.push(buttonNum);
+      await execFileAsync('xdotool', xdotoolArgs, { timeout: 15000, maxBuffer: MAX_OUTPUT_BYTES });
+      const cur = await getCursorPositionLinux();
+      finalX = cur?.x ?? 0;
+      finalY = cur?.y ?? 0;
+    }
+  } else {
+    throw new Error('Mouse scrolling is supported on Windows and Linux/X11 only.');
+  }
+
+  const activeScreen = info.screens.find(s =>
+    finalX >= s.x && finalX < s.x + s.width &&
+    finalY >= s.y && finalY < s.y + s.height
+  ) ?? null;
+
+  return {
+    ok: true,
+    direction,
+    amount,
+    x: finalX,
+    y: finalY,
+    screenIndex: activeScreen ? activeScreen.index : null,
+    relativeX: activeScreen ? finalX - activeScreen.x : null,
+    relativeY: activeScreen ? finalY - activeScreen.y : null,
+  };
 }
 
 export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
     case 'get_screen_info': return getScreenInfo();
     case 'take_screenshot': return takeScreenshot(args);
+    case 'read_image_file': return readImageFile(args);
+    case 'click_mouse': return clickMouse(args);
+    case 'move_mouse': return moveMouse(args);
+    case 'scroll_mouse': return scrollMouse(args);
     case 'get_screen_pixel': return getScreenPixel(args);
     case 'npm_test': return runNpmTool('npm_test', args, logCommand);
     case 'npm_run': return runNpmTool('npm_run', args, logCommand);

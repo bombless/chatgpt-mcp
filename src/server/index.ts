@@ -10,7 +10,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
-import { approve, authorizationPage, exchangeToken, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
+import { approve, authorizationPage, exchangeToken, getBaseUrl, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 import { applyNativePatch } from './native-patch.js';
@@ -21,7 +21,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8787);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 const LEGACY_MCP_TOKEN = process.env.MCP_TOKEN;
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? 'https://bombless.duckdns.org').replace(/\/$/, '');
+const PUBLIC_URL = process.env.PUBLIC_URL ? process.env.PUBLIC_URL.replace(/\/$/, '') : undefined;
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 60_000);
 const MCP_DEBUG = process.env.MCP_DEBUG === '1' || process.env.DEBUG_MCP === '1';
 if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set');
@@ -65,7 +65,7 @@ function resultContent(value: unknown) {
 }
 function bearer(req: express.Request) { const value = req.header('authorization'); return value?.startsWith('Bearer ') ? value.slice(7) : undefined; }
 async function mcpAuthorized(req: express.Request) { const token = bearer(req); const oauthValid = await validAccessToken(token); const legacyValid = !!LEGACY_MCP_TOKEN && token === LEGACY_MCP_TOKEN; mcpDebug('authorization:check', { ...safeAuthInfo(req), oauthValid, legacyValid }); return oauthValid || legacyValid; }
-function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${PUBLIC_URL}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
+function mcpUnauthorized(res: express.Response, req?: express.Request) { if (req) mcpDebug('authorization:rejected', safeAuthInfo(req)); const baseUrl = getBaseUrl(req); res.setHeader('WWW-Authenticate', `Bearer resource_metadata=\"${baseUrl}/.well-known/oauth-protected-resource\"`); return res.status(401).json({ error: 'unauthorized', error_description: 'OAuth access token required' }); }
 
 function buildMcpServer() {
   const server = new McpServer({ name: 'chatgpt-windows-bridge', version: '0.3.0' });
@@ -107,6 +107,35 @@ function buildMcpServer() {
   );
   server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
 
+  server.registerTool('read_image_file', {
+    description: 'Read a JPEG or PNG image from an absolute path on the connected agent and return it as a native MCP image block. The resolved file must be inside AGENT_WORKSPACE; maximum size is 20 MiB.',
+    inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }),
+  }, async ({ agentId, path: imagePath, intent }) => {
+    try {
+      const image = await registry.call(agentId, 'read_image_file', { path: imagePath, intent }) as {
+        path: string; mimeType: string; data: string; dataBytes: number; dataSha256: string;
+      };
+      if (!image || !image.data || !['image/jpeg', 'image/png'].includes(image.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(image.data)) {
+        throw new Error('Agent returned invalid image data');
+      }
+      const bytes = Buffer.from(image.data, 'base64');
+      if (bytes.length !== image.dataBytes || bytes.length > 20 * 1024 * 1024) throw new Error('Image byte length is invalid or exceeds 20 MiB');
+      const validJpeg = image.mimeType === 'image/jpeg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+      const validPng = image.mimeType === 'image/png' && bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      if (!validJpeg && !validPng) throw new Error('Image content does not match its declared JPEG/PNG MIME type');
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== image.dataSha256) throw new Error('Image SHA-256 mismatch');
+      return { content: [
+        { type: 'text' as const, text: JSON.stringify({ path: image.path, mimeType: image.mimeType, dataBytes: image.dataBytes, dataSha256: digest }, null, 2) },
+        { type: 'image' as const, data: image.data, mimeType: image.mimeType },
+      ] };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'read_image_file', message });
+      throw new Error(`read_image_file failed: ${message}`);
+    }
+  });
+
   server.registerTool('get_screen_info', {
     description: 'List every attached display/monitor, including stable index, device name, bounds, resolution, primary status, and virtual desktop coordinates.',
     inputSchema: input({ agentId: agentIdSchema }),
@@ -121,11 +150,22 @@ function buildMcpServer() {
   }, z.object({ result: z.object({ screenIndex: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), absoluteX: z.number().int(), absoluteY: z.number().int(), r: z.number().int().min(0).max(255), g: z.number().int().min(0).max(255), b: z.number().int().min(0).max(255), hex: z.string(), format: z.string(), note: z.string() }) }));
   
   server.registerTool('take_screenshot', {
-    description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Call get_screen_info for display indices and bounds.',
-    inputSchema: input({ agentId: agentIdSchema, screenIndex: z.number().int().min(0).optional(), x: z.number().int().min(0).optional(), y: z.number().int().min(0).optional(), width: z.number().int().min(1).optional(), height: z.number().int().min(1).optional() }),
-  }, async ({ agentId, screenIndex, x, y, width, height, intent }) => {
+    description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Pass highlightCursor=true to visually emphasize the mouse cursor position on the captured image. Returns current mouse cursor coordinates. Call get_screen_info for display indices and bounds.',
+    inputSchema: input({
+      agentId: agentIdSchema,
+      screenIndex: z.number().int().min(0).optional(),
+      x: z.number().int().min(0).optional(),
+      y: z.number().int().min(0).optional(),
+      width: z.number().int().min(1).optional(),
+      height: z.number().int().min(1).optional(),
+      highlightCursor: z.boolean().optional(),
+    }),
+  }, async ({ agentId, screenIndex, x, y, width, height, highlightCursor, intent }) => {
     try {
-    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, intent }) as { screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }> };
+    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, highlightCursor, intent }) as {
+      cursor?: { x: number; y: number; screenIndex: number | null; relativeX: number | null; relativeY: number | null } | null;
+      screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }>;
+    };
     if (!captured || !Array.isArray(captured.screens) || captured.screens.length === 0) throw new Error('Agent returned an invalid or empty screenshot response');
     if (captured.screens.some(screen => !screen.data || !/^image\/(png|jpeg|webp)$/u.test(screen.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(screen.data))) {
       throw new Error('Agent returned invalid screenshot image data');
@@ -140,7 +180,14 @@ function buildMcpServer() {
       mcpDebug('screenshot:integrity-ok', { agentId, screenIndex: screen.index, width: screen.width, height: screen.height, bytes: bytes.length, sha256: digest });
     }
     const content = [
-      { type: 'text' as const, text: JSON.stringify({ count: captured.screens.length, screens: captured.screens.map(({ data, ...metadata }) => metadata) }, null, 2) },
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          cursor: captured.cursor ?? null,
+          count: captured.screens.length,
+          screens: captured.screens.map(({ data, ...metadata }) => metadata),
+        }, null, 2),
+      },
       ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
     ];
     // Do not return structuredContent for screenshots: clients may prioritize it
@@ -153,6 +200,65 @@ function buildMcpServer() {
       throw new Error(`take_screenshot failed: ${message}`);
     }
   });
+
+  codingTool('click_mouse', 'Click or double-click the mouse at specified coordinates or current cursor position. If screenIndex is provided, x and y are relative to that display; otherwise they are absolute virtual-desktop coordinates. If x and y are omitted, clicks at current cursor position.', {
+    agentId: agentIdSchema,
+    screenIndex: z.number().int().min(0).optional(),
+    x: z.number().int().optional(),
+    y: z.number().int().optional(),
+    button: z.enum(['left', 'right', 'middle']).default('left'),
+    doubleClick: z.boolean().default(false),
+    clickCount: z.number().int().min(1).max(3).default(1),
+  }, z.object({
+    result: z.object({
+      ok: z.literal(true),
+      button: z.enum(['left', 'right', 'middle']),
+      clickCount: z.number().int(),
+      x: z.number().int(),
+      y: z.number().int(),
+      screenIndex: z.number().int().nullable(),
+      relativeX: z.number().int().nullable(),
+      relativeY: z.number().int().nullable(),
+    })
+  }));
+
+  codingTool('move_mouse', 'Move the mouse cursor to specified coordinates. If screenIndex is provided, x and y are relative to that display; otherwise they are absolute virtual-desktop coordinates.', {
+    agentId: agentIdSchema,
+    screenIndex: z.number().int().min(0).optional(),
+    x: z.number().int(),
+    y: z.number().int(),
+  }, z.object({
+    result: z.object({
+      ok: z.literal(true),
+      x: z.number().int(),
+      y: z.number().int(),
+      screenIndex: z.number().int().nullable(),
+      relativeX: z.number().int().nullable(),
+      relativeY: z.number().int().nullable(),
+    })
+  }));
+
+  codingTool('scroll_mouse', 'Scroll the mouse wheel up, down, left, or right by a specified amount (ticks/clicks). IMPORTANT: Before scrolling a page, list, table, or panel, inspect the latest screenshot and move the pointer to a point INSIDE the intended scrollable content (for example, over a list item, not the header, blank margin, or another window), then scroll using explicit x, y, and screenIndex. Do not assume scrolling worked: take another screenshot and verify the target content moved; if it did not, try a different point inside the content or a smaller scroll amount, then verify again. If x and y are provided, moves the cursor there before scrolling; otherwise scrolls at the current cursor position. If screenIndex is provided, x and y are relative to that display.', {
+    agentId: agentIdSchema,
+    screenIndex: z.number().int().min(0).optional(),
+    x: z.number().int().optional(),
+    y: z.number().int().optional(),
+    direction: z.enum(['up', 'down', 'left', 'right']).default('down'),
+    amount: z.number().int().min(1).default(1),
+    deltaY: z.number().int().optional(),
+    deltaX: z.number().int().optional(),
+  }, z.object({
+    result: z.object({
+      ok: z.literal(true),
+      direction: z.enum(['up', 'down', 'left', 'right']),
+      amount: z.number().int(),
+      x: z.number().int(),
+      y: z.number().int(),
+      screenIndex: z.number().int().nullable(),
+      relativeX: z.number().int().nullable(),
+      relativeY: z.number().int().nullable(),
+    })
+  }));
 
   npmTool('npm_test', 'Run `npm test` in the workspace. This tool always invokes the npm test lifecycle and cannot select another npm subcommand.', ({ args }) => ['test', ...(Array.isArray(args) ? args.map(String) : [])]);
   npmTool('npm_run', 'Run one named npm script with `npm run <script>`. Extra arguments are passed to that script after `--`.', ({ args }) => { const values = Array.isArray(args) ? args.map(String) : []; const script = values.shift(); if (!script) throw new Error('npm_run requires a script name in args[0]'); return ['run', script, ...(values.length ? ['--', ...values] : [])]; });
@@ -201,19 +307,38 @@ function buildMcpServer() {
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', true);
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use((req, res, next) => { const id = requestId(req); res.setHeader('X-Request-Id', id); if (MCP_DEBUG) mcpDebug('http:request', { requestId: id, method: req.method, path: req.path, query: req.query, contentType: req.get('content-type'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined, ...safeAuthInfo(req) }); res.on('finish', () => { if (MCP_DEBUG) mcpDebug('http:response', { requestId: id, method: req.method, path: req.path, status: res.statusCode }); }); next(); });
 app.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
-app.get('/.well-known/oauth-authorization-server', (_req, res) => res.json(oauthMetadata()));
-app.get('/.well-known/oauth-protected-resource', (_req, res) => res.json(protectedResourceMetadata()));
+app.get('/.well-known/oauth-authorization-server', (req, res) => res.json(oauthMetadata(getBaseUrl(req))));
+app.get('/.well-known/openid-configuration', (req, res) => res.json(oauthMetadata(getBaseUrl(req))));
+app.get('/.well-known/oauth-protected-resource', (req, res) => res.json(protectedResourceMetadata(getBaseUrl(req))));
+app.get('/.well-known/oauth-protected-resource/*subpath', (req, res) => res.json(protectedResourceMetadata(getBaseUrl(req))));
 app.post('/oauth/register', async (req, res) => { try { res.status(201).json(await registerClient(req.body)); } catch (e) { res.status(400).json({ error: 'invalid_client_metadata', error_description: String(e instanceof Error ? e.message : e) }); } });
 app.get('/oauth/authorize', async (req, res) => { const result = await authorizationPage(req); res.status(result.status).type('html').send(result.body); });
 app.post('/oauth/authorize/approve', async (req, res) => { const result = await approve(req); if (result.location) return res.redirect(302, result.location); return res.status(result.status).send(result.body); });
 app.post('/oauth/token', async (req, res) => { try { res.json(await exchangeToken(req.body)); } catch (e) { const error = String(e instanceof Error ? e.message : e); res.status(400).json({ error }); } });
 app.get('/agents', async (req, res) => { if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req); res.json({ agents: registry.list() }); });
 
-function isLocalAdminRequest(req: express.Request) { const ip = req.socket.remoteAddress ?? ''; const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'; const fromCaddy = req.get('X-From-Caddy') === 'true'; return loopback && !fromCaddy; }
+function isLocalAdminRequest(req: express.Request) {
+  const ip = req.socket.remoteAddress ?? '';
+  const loopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  const hasProxyHeader = Boolean(req.get('x-forwarded-for') || req.get('x-forwarded-host'));
+  const fromCaddy = req.get('X-From-Caddy') === 'true' || hasProxyHeader;
+  return loopback && !fromCaddy;
+}
 
 app.get('/', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
@@ -292,7 +417,12 @@ wss.on('connection', ws => {
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`MCP gateway listening on :${PORT}`);
-  console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
-  console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
+  if (PUBLIC_URL) {
+    console.log(`Public MCP: ${PUBLIC_URL}/mcp`);
+    console.log(`Agent endpoint: ${PUBLIC_URL}/agent`);
+  } else {
+    console.log(`Public MCP: dynamic (determined by request Host header, e.g. https://<your-host>/mcp)`);
+    console.log(`Agent endpoint: ws://127.0.0.1:${PORT}/agent (or wss://<your-host>/agent)`);
+  }
   console.log(`Debug logging: MCP=${MCP_DEBUG ? 'on' : 'off'}`);
 });
