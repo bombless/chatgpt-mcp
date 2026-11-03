@@ -32,12 +32,14 @@ try {
   const search = await call('rg', { query: 'needle' }) as any;
   assert.match(search.stdout, /needle here/);
 
-  const range = await call('read_file_range', { path: file, startLine: 2, endLine: 4 }) as string;
-  assert.match(range, /2: two/);
-  assert.match(range, /4: needle here/);
+  const range = await call('read_file_range', { path: file, startLine: 2, endLine: 4 }) as any;
+  assert.match(range.content, /2: two/);
+  assert.match(range.content, /4: needle here/);
+  assert.equal(range.sha256.length, 64);
 
-  const tail = await call('tail_file', { path: file, lines: 2 }) as string;
-  assert.equal(tail, 'needle here\nfive');
+  const tail = await call('tail_file', { path: file, lines: 2 }) as any;
+  assert.equal(tail.content, 'needle here\nfive');
+  assert.equal(tail.sha256, range.sha256);
 
   const info = await call('get_file_info', { path: file }) as any;
   assert.equal(info.type, 'file');
@@ -46,8 +48,10 @@ try {
   await call('create_directory', { path: nested });
   assert.equal((await fs.stat(nested)).isDirectory(), true);
 
-  await call('copy_file', { source: file, destination: copy });
+  const sourceHash = (await call('read_file_range', { path: file, startLine: 1, endLine: 5 }) as any).sha256;
+  await call('copy_file', { source: file, destination: copy, expectedSourceSha256: sourceHash });
   assert.equal(await fs.readFile(copy, 'utf8'), await fs.readFile(file, 'utf8'));
+  await assert.rejects(() => call('copy_file', { source: file, destination: copy, expectedSourceSha256: sourceHash }), /expectedDestinationSha256 is required/);
 
   const node = await call('run_node', { args: ['-e', 'console.log(6 * 7)'] }) as any;
   assert.match(node.stdout, /42/);
@@ -133,11 +137,13 @@ try {
   const editFile = path.join(root, 'edit.txt');
   await fs.writeFile(editFile, 'alpha\nbeta\ngamma\n', 'utf8');
   const before = await fs.readFile(editFile, 'utf8');
+  const beforeHash = (await call('read_file_range', { path: editFile, startLine: 1, endLine: 3 }) as any).sha256;
   const edit = await call('edit_file', {
     path: editFile,
     oldText: 'beta',
     newText: 'delta',
     expectedReplacements: 1,
+    expectedSha256: beforeHash,
   }) as any;
   assert.equal(edit.ok, true);
   assert.equal(edit.replacements, 1);
@@ -149,19 +155,23 @@ try {
   assert.equal(await fs.readFile(editFile, 'utf8'), 'alpha\ndelta\ngamma\n');
 
   await fs.writeFile(editFile, 'same\nsame\n', 'utf8');
+  const sameHash = (await call('read_file_range', { path: editFile, startLine: 1, endLine: 2 }) as any).sha256;
   await assert.rejects(() => call('edit_file', {
     path: editFile,
     oldText: 'same',
     newText: 'changed',
+    expectedSha256: sameHash,
   }), /Expected 1 replacement, but found 2/);
   assert.equal(await fs.readFile(editFile, 'utf8'), 'same\nsame\n');
 
   const stable = await fs.readFile(editFile, 'utf8');
+  const stableHash = (await call('read_file_range', { path: editFile, startLine: 1, endLine: 2 }) as any).sha256;
   const stableSha = await call('edit_file', {
     path: editFile,
     oldText: 'same',
     newText: 'changed',
     expectedReplacements: 2,
+    expectedSha256: stableHash,
   }) as any;
   assert.equal(stableSha.replacements, 2);
   await fs.writeFile(editFile, stable, 'utf8');
@@ -172,6 +182,12 @@ try {
     expectedReplacements: 2,
     expectedSha256: '0'.repeat(64),
   }), /File changed since it was read/);
+  await assert.rejects(() => call('edit_file', {
+    path: editFile,
+    oldText: 'same',
+    newText: 'changed',
+    expectedReplacements: 2,
+  }), /expectedSha256 must be a non-empty string/);
   assert.equal(await fs.readFile(editFile, 'utf8'), stable);
   assert.equal(before, 'alpha\nbeta\ngamma\n');
 

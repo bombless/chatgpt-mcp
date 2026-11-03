@@ -77,18 +77,33 @@ function parsePatch(patch: string): PatchOperation[] {
 }
 
 export type NativePatchExecutor = {
-  editFile: (path: string, oldText: string, newText: string) => Promise<unknown>;
-  writeFile: (path: string, content: string) => Promise<unknown>;
-  deleteFile: (path: string) => Promise<unknown>;
+  editFile: (path: string, oldText: string, newText: string, expectedSha256: string) => Promise<unknown>;
+  writeFile: (path: string, content: string, expectedSha256: string) => Promise<unknown>;
+  deleteFile: (path: string, expectedSha256: string) => Promise<unknown>;
 };
 
-export async function applyNativePatch(patch: string, executor: NativePatchExecutor) {
+export async function applyNativePatch(patch: string, executor: NativePatchExecutor, expectedSha256ByPath: Record<string, string>) {
   const operations = parsePatch(patch);
   const results: unknown[] = [];
   for (const operation of operations) {
-    if (operation.kind === 'add') results.push(await executor.writeFile(operation.path, operation.content));
-    else if (operation.kind === 'delete') results.push(await executor.deleteFile(operation.path));
-    else for (const hunk of operation.hunks) results.push(await executor.editFile(operation.path, hunk.oldText, hunk.newText));
+    const expected = expectedSha256ByPath[operation.path];
+    if (!expected) throw new Error(`Missing expectedSha256ByPath entry for ${operation.path}`);
+    if (operation.kind === 'add') {
+      if (expected !== '__missing__') throw new Error(`Add File ${operation.path} requires expected hash __missing__`);
+      results.push(await executor.writeFile(operation.path, operation.content, expected));
+    } else if (operation.kind === 'delete') {
+      if (!/^[a-fA-F0-9]{64}$/u.test(expected)) throw new Error(`Delete File ${operation.path} requires its current SHA-256`);
+      results.push(await executor.deleteFile(operation.path, expected));
+    } else {
+      if (!/^[a-fA-F0-9]{64}$/u.test(expected)) throw new Error(`Update File ${operation.path} requires its current SHA-256`);
+      let currentHash = expected;
+      for (const hunk of operation.hunks) {
+        const result = await executor.editFile(operation.path, hunk.oldText, hunk.newText, currentHash) as { sha256After?: string };
+        if (!result || typeof result.sha256After !== 'string') throw new Error(`Update File ${operation.path} did not return a new SHA-256`);
+        currentHash = result.sha256After;
+        results.push(result);
+      }
+    }
   }
   return { ok: true, files: operations.map(operation => ({ path: operation.path, kind: operation.kind })), results };
 }

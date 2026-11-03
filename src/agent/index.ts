@@ -1,6 +1,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import WebSocket from 'ws'
@@ -67,13 +68,29 @@ getConfig().then(config => {
     switch (request.tool as ToolName) {
       case 'read_file': {
         const file = assertAllowed(String(request.args.path), 'read_file')
-        return await fs.readFile(file, 'utf8')
+        const bytes = await fs.readFile(file)
+        return { path: file, content: bytes.toString('utf8'), sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length }
       }
       case 'write_file': {
         const file = assertAllowed(String(request.args.path), 'write_file')
         const content = String(request.args.content)
-        await fs.writeFile(file, content, 'utf8')
-        return { ok: true, path: file }
+        const expectedSha256 = typeof request.args.expectedSha256 === 'string' ? request.args.expectedSha256.toLowerCase() : undefined
+        let current: Buffer | undefined
+        try { current = await fs.readFile(file) } catch (error: any) { if (error.code !== 'ENOENT') throw error }
+        if (current && !expectedSha256) throw new Error('expectedSha256 is required when overwriting an existing file; read the file first')
+        if (!current && expectedSha256) throw new Error('File changed since it was read: file no longer exists')
+        const beforeSha256 = current ? crypto.createHash('sha256').update(current).digest('hex') : null
+        if (expectedSha256 && beforeSha256 !== expectedSha256) throw new Error(`File changed since it was read: expected sha256 ${expectedSha256}, current sha256 ${beforeSha256}`)
+        const temporary = path.join(path.dirname(file), `.${path.basename(file)}.mcp-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`)
+        try {
+          await fs.writeFile(temporary, content, 'utf8')
+          const latest = await fs.readFile(file).catch((error: any) => error.code === 'ENOENT' ? undefined : Promise.reject(error))
+          const latestSha256 = latest ? crypto.createHash('sha256').update(latest).digest('hex') : null
+          if (latestSha256 !== beforeSha256) throw new Error('File changed while the write was being prepared; refusing to overwrite it')
+          await fs.rename(temporary, file)
+        } finally { await fs.rm(temporary, { force: true }) }
+        const after = Buffer.from(content, 'utf8')
+        return { ok: true, path: file, sha256Before: beforeSha256, sha256After: crypto.createHash('sha256').update(after).digest('hex'), bytesAfter: after.length }
       }
       case 'list_directory': {
         const dir = assertAllowed(String(request.args.path), 'list_directory')
@@ -92,15 +109,28 @@ getConfig().then(config => {
           String(request.args.destination),
           'move_file destination'
         )
+        const expectedSha256 = typeof request.args.expectedSha256 === 'string' ? request.args.expectedSha256.toLowerCase() : ''
+        if (!/^[a-f0-9]{64}$/u.test(expectedSha256)) throw new Error('expectedSha256 is required; read the source file first')
+        const sourceBytes = await fs.readFile(source)
+        const sourceSha256 = crypto.createHash('sha256').update(sourceBytes).digest('hex')
+        if (sourceSha256 !== expectedSha256) throw new Error(`File changed since it was read: expected sha256 ${expectedSha256}, current sha256 ${sourceSha256}`)
+        try { await fs.access(destination); throw new Error(`Destination already exists: ${destination}`) } catch (error: any) { if (error.code !== 'ENOENT') throw error }
+        const latest = await fs.readFile(source)
+        if (crypto.createHash('sha256').update(latest).digest('hex') !== expectedSha256) throw new Error('File changed while the move was being prepared; refusing to move it')
         await fs.rename(source, destination)
-        return { ok: true, source, destination }
+        return { ok: true, source, destination, sha256: expectedSha256 }
       }
       case 'delete_file': {
         const target = assertAllowed(String(request.args.path), 'delete_file')
-        const stat = await fs.lstat(target)
-        if (stat.isDirectory()) await fs.rmdir(target)
-        else await fs.unlink(target)
-        return { ok: true, path: target }
+        const expectedSha256 = typeof request.args.expectedSha256 === 'string' ? request.args.expectedSha256.toLowerCase() : ''
+        if (!/^[a-f0-9]{64}$/u.test(expectedSha256)) throw new Error('expectedSha256 is required; read the file first')
+        const bytes = await fs.readFile(target)
+        const currentSha256 = crypto.createHash('sha256').update(bytes).digest('hex')
+        if (currentSha256 !== expectedSha256) throw new Error(`File changed since it was read: expected sha256 ${expectedSha256}, current sha256 ${currentSha256}`)
+        const latest = await fs.readFile(target)
+        if (crypto.createHash('sha256').update(latest).digest('hex') !== expectedSha256) throw new Error('File changed while deletion was being prepared; refusing to delete it')
+        await fs.unlink(target)
+        return { ok: true, path: target, sha256Before: currentSha256 }
       }
       case 'execute_powershell': {
         if (!IS_WINDOWS)

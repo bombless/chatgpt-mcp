@@ -112,14 +112,19 @@ function stringArg(args: Record<string, unknown>, name: string): string {
   return value;
 }
 
-async function writeFileAtomic(file: string, content: string) {
+async function writeFileAtomic(file: string, content: string, expectedSha256: string) {
   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.mcp-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
   try {
     await fs.writeFile(temporary, content, 'utf8');
+    const latest = await fs.readFile(file);
+    const latestSha256 = sha256(latest);
+    if (latestSha256 !== expectedSha256) throw new Error(`File changed while the edit was being prepared: expected sha256 ${expectedSha256}, current sha256 ${latestSha256}`);
     try {
       await fs.rename(temporary, file);
     } catch (error) {
       if (process.platform !== 'win32') throw error;
+      const immediatelyBeforeReplace = await fs.readFile(file);
+      if (sha256(immediatelyBeforeReplace) !== expectedSha256) throw new Error('File changed before replacement; refusing to overwrite it');
       await fs.rm(file, { force: true });
       await fs.rename(temporary, file);
     }
@@ -128,8 +133,8 @@ async function writeFileAtomic(file: string, content: string) {
   }
 }
 
-function sha256(content: string) {
-  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+function sha256(content: Buffer | string) {
+  return crypto.createHash('sha256').update(content).digest('hex');
 }
 
 async function editFile(args: Record<string, unknown>) {
@@ -139,10 +144,12 @@ async function editFile(args: Record<string, unknown>) {
   if (newText === undefined) throw new Error('newText must be a string');
   if (oldText === newText) throw new Error('oldText and newText must be different');
 
-  const content = await fs.readFile(file, 'utf8');
-  const expectedSha256 = typeof args.expectedSha256 === 'string' && args.expectedSha256 ? args.expectedSha256.toLowerCase() : undefined;
-  const beforeSha256 = sha256(content);
-  if (expectedSha256 && beforeSha256 !== expectedSha256) {
+  const expectedSha256 = stringArg(args, 'expectedSha256').toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(expectedSha256)) throw new Error('expectedSha256 must be a 64-character SHA-256 hex string');
+  const originalBytes = await fs.readFile(file);
+  const content = originalBytes.toString('utf8');
+  const beforeSha256 = sha256(originalBytes);
+  if (beforeSha256 !== expectedSha256) {
     throw new Error(`File changed since it was read: expected sha256 ${expectedSha256}, current sha256 ${beforeSha256}`);
   }
 
@@ -162,7 +169,7 @@ async function editFile(args: Record<string, unknown>) {
   }
 
   const updated = content.split(oldText).join(newText);
-  await writeFileAtomic(file, updated);
+  await writeFileAtomic(file, updated, beforeSha256);
   const afterSha256 = sha256(updated);
   const beforeLines = oldText.split(/\r?\n/);
   const afterLines = newText.split(/\r?\n/);
@@ -406,16 +413,18 @@ async function readFileRange(args: Record<string, unknown>) {
   const file = assertAllowed(stringArg(args, 'path'));
   const start = Math.max(1, Number(args.startLine ?? 1));
   const end = Math.max(start, Number(args.endLine ?? start + 199));
-  const content = await fs.readFile(file, 'utf8');
+  const bytes = await fs.readFile(file);
+  const content = bytes.toString('utf8');
   const lines = content.split(/\r?\n/).slice(start - 1, end);
-  return lines.map((line, i) => `${start + i}: ${line}`).join('\n');
+  return { path: file, content: lines.map((line, i) => `${start + i}: ${line}`).join('\n'), sha256: sha256(bytes), bytes: bytes.length };
 }
 
 async function tailFile(args: Record<string, unknown>) {
   const file = assertAllowed(stringArg(args, 'path'));
   const lines = Math.max(1, Number(args.lines ?? 100));
-  const content = await fs.readFile(file, 'utf8');
-  return content.split(/\r?\n/).slice(-lines).join('\n');
+  const bytes = await fs.readFile(file);
+  const content = bytes.toString('utf8');
+  return { path: file, content: content.split(/\r?\n/).slice(-lines).join('\n'), sha256: sha256(bytes), bytes: bytes.length };
 }
 
 async function fileInfo(args: Record<string, unknown>) {
@@ -433,8 +442,29 @@ async function createDirectory(args: Record<string, unknown>) {
 async function copyFile(args: Record<string, unknown>) {
   const source = assertAllowed(stringArg(args, 'source'));
   const destination = assertAllowed(stringArg(args, 'destination'));
-  await fs.copyFile(source, destination);
-  return { ok: true, source, destination };
+  const expectedSourceSha256 = stringArg(args, 'expectedSourceSha256').toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(expectedSourceSha256)) throw new Error('expectedSourceSha256 must be a 64-character SHA-256 hex string');
+  const sourceBytes = await fs.readFile(source);
+  const sourceSha256 = sha256(sourceBytes);
+  if (sourceSha256 !== expectedSourceSha256) throw new Error(`Source file changed since it was read: expected sha256 ${expectedSourceSha256}, current sha256 ${sourceSha256}`);
+  const expectedDestinationSha256 = typeof args.expectedDestinationSha256 === 'string' ? args.expectedDestinationSha256.toLowerCase() : undefined;
+  let destinationBytes: Buffer | undefined;
+  try { destinationBytes = await fs.readFile(destination); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  if (destinationBytes && !expectedDestinationSha256) throw new Error('expectedDestinationSha256 is required when overwriting an existing destination file');
+  if (!destinationBytes && expectedDestinationSha256) throw new Error('Destination changed since it was read: destination no longer exists');
+  const beforeDestinationSha256 = destinationBytes ? sha256(destinationBytes) : null;
+  if (expectedDestinationSha256 && beforeDestinationSha256 !== expectedDestinationSha256) throw new Error(`Destination file changed: expected sha256 ${expectedDestinationSha256}, current sha256 ${beforeDestinationSha256}`);
+  const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.mcp-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  try {
+    await fs.writeFile(temporary, sourceBytes);
+    if (sha256(await fs.readFile(source)) !== expectedSourceSha256) throw new Error('Source file changed while the copy was being prepared');
+    let latestDestination: Buffer | undefined;
+    try { latestDestination = await fs.readFile(destination); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    const latestHash = latestDestination ? sha256(latestDestination) : null;
+    if (latestHash !== beforeDestinationSha256) throw new Error('Destination file changed while the copy was being prepared');
+    await fs.rename(temporary, destination);
+  } finally { await fs.rm(temporary, { force: true }); }
+  return { ok: true, source, destination, sha256Source: sourceSha256, sha256Before: beforeDestinationSha256, sha256After: sourceSha256 };
 }
 
 async function processList(logCommand?: CommandLogger) {
