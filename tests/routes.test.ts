@@ -40,6 +40,15 @@ test('Vue admin component calls the required admin and health endpoints', () => 
   assert.match(adminApp, /runTool\('write_file'\)/);
 });
 
+test('admin test-tool defaults are derived from the selected agent workspace', () => {
+  assert.match(adminApp, /tool:'get_system_info',args:\{agentId\}/);
+  assert.match(adminApp, /workspace\.value=r\.result\.workspace/);
+  assert.match(adminApp, /readPath\.value=`\$\{root\}\$\{separator\}mcp-test\.txt`/);
+  assert.match(adminApp, /writePath\.value=`\$\{root\}\$\{separator\}mcp-created\.txt`/);
+  assert.doesNotMatch(adminApp, /C:\\\\Users\\\\bombl\\\\Desktop/);
+  assert.match(adminApp, /watch\(selectedAgent/);
+});
+
 test('local admin endpoints keep the loopback-only guard', () => {
   assert.match(serverSource, /function isLocalAdminRequest[\s\S]*?return loopback && !fromCaddy/);
   assert.match(serverSource, /app\.get\(['"]\/_admin\/totp['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
