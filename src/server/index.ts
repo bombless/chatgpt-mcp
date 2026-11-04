@@ -343,8 +343,9 @@ function isLocalAdminRequest(req: express.Request) {
 
 app.get('/', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  res.type('html').send(readFileSync(resolve(__dirname, 'admin.html'), 'utf8'));
+  res.type('html').send(readFileSync(resolve(__dirname, 'admin-ui/admin.html'), 'utf8'));
 });
+app.use('/assets', express.static(resolve(__dirname, 'admin-ui/assets'), { index: false, immutable: true, maxAge: '1y' }));
 
 app.get('/_admin/totp', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
