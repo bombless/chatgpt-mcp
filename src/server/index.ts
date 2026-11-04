@@ -32,10 +32,35 @@ function safeAuthInfo(req: express.Request) { const authorization = req.header('
 
 class AgentRegistry {
   private readonly agents = new Map<string, WebSocket>();
+  private readonly metadata = new Map<string, { hostname: string; platform: string; username: string; workspace: string; version: string }>();
   private readonly pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  add(agentId: string, socket: WebSocket) { const old = this.agents.get(agentId); old?.close(4000, 'replaced by a newer connection'); this.agents.set(agentId, socket); socket.on('close', () => { if (this.agents.get(agentId) === socket) this.agents.delete(agentId); }); }
+  add(agentId: string, socket: WebSocket, metadata: { hostname: string; platform: string; username: string; workspace: string; version: string }) {
+    const old = this.agents.get(agentId);
+    old?.close(4000, 'replaced by a newer connection');
+    this.agents.set(agentId, socket);
+    this.metadata.set(agentId, metadata);
+    socket.on('close', () => {
+      if (this.agents.get(agentId) === socket) {
+        this.agents.delete(agentId);
+        this.metadata.delete(agentId);
+      }
+    });
+  }
   get(agentId: string) { const socket = this.agents.get(agentId); return socket?.readyState === WebSocket.OPEN ? socket : undefined; }
-  list() { return [...this.agents.keys()]; }
+  list() {
+    return [...this.agents.keys()].map(agentId => {
+      const metadata = this.metadata.get(agentId);
+      return {
+        agentId,
+        hostname: metadata?.hostname ?? agentId,
+        os: metadata?.platform === 'win32' ? 'windows' : metadata?.platform === 'linux' ? 'linux' : metadata?.platform ?? 'unknown',
+        platform: metadata?.platform ?? 'unknown',
+        username: metadata?.username ?? 'unknown',
+        workspace: metadata?.workspace ?? 'unknown',
+        version: metadata?.version ?? 'unknown',
+      };
+    });
+  }
   notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }) {
     const socket = this.get(agentId);
     if (!socket) { mcpDebug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }
@@ -85,7 +110,19 @@ function buildMcpServer() {
     server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
       resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
 
-  server.registerTool('list_agents', { description: 'List connected agents.', inputSchema: z.object({ intent: intentSchema }), outputSchema: z.object({ result: z.array(z.string()) }) }, async () => resultContent(registry.list()));
+  server.registerTool('list_agents', {
+    description: 'List connected agents with their operating system, login username, hostname, and workspace directory.',
+    inputSchema: z.object({ intent: intentSchema }),
+    outputSchema: z.object({ result: z.array(z.object({
+      agentId: z.string(),
+      hostname: z.string(),
+      os: z.string(),
+      platform: z.string(),
+      username: z.string(),
+      workspace: z.string(),
+      version: z.string(),
+    })) }),
+  }, async () => resultContent(registry.list()));
   server.registerTool('submit_improvement_suggestion', { description: 'Persist a concrete suggestion for improving this MCP service. Use when actual usage reveals recurring friction, missing capabilities, unclear tool behavior, reliability/performance/usability/security issues, or a valuable enhancement. Include observed context and expected benefit; do not submit generic or speculative suggestions. This records feedback only and does not modify the server.', inputSchema: input({ title: z.string().trim().min(5).max(160), description: z.string().trim().min(10).max(4000), category: z.enum(suggestionCategories), priority: z.enum(suggestionPriorities).default('medium'), source: z.string().trim().max(500).optional() }), outputSchema: z.object({ result: z.object({ suggestion: z.object({ id: z.string(), title: z.string(), status: z.string(), occurrences: z.number().int() }), deduplicated: z.boolean() }) }) }, async ({ title, description, category, priority, source }) => { const result = await submitImprovementSuggestion({ title, description, category, priority, source }); return resultContent({ suggestion: { id: result.suggestion.id, title: result.suggestion.title, status: result.suggestion.status, occurrences: result.suggestion.occurrences }, deduplicated: result.deduplicated }); });
   server.registerTool('list_improvement_suggestions', { description: 'List persisted MCP improvement suggestions. Filter by status/category to review the backlog and identify recurring priorities.', inputSchema: input({ status: z.enum(suggestionStatuses).optional(), category: z.enum(suggestionCategories).optional(), limit: z.number().int().min(1).max(200).default(50) }), outputSchema: z.object({ result: z.array(z.object({ id: z.string(), title: z.string(), description: z.string(), category: z.string(), priority: z.string(), status: z.string(), created_at: z.number(), updated_at: z.number(), occurrences: z.number().int() })) }) }, async ({ status, category, limit }) => resultContent(await listImprovementSuggestions({ status, category, limit })));
   server.registerTool('update_improvement_suggestion', { description: 'Update the workflow status of a persisted MCP improvement suggestion. Use only when the user requests backlog maintenance or a status change; this does not implement the suggestion itself.', inputSchema: input({ id: z.string().uuid(), status: z.enum(suggestionStatuses), note: z.string().trim().max(1000).optional() }), outputSchema: z.object({ result: z.object({ id: z.string(), title: z.string(), status: z.string(), updated_at: z.number() }) }) }, async ({ id, status, note }) => { const result = await updateImprovementSuggestion({ id, status, note }); return resultContent({ id: result.id, title: result.title, status: result.status, updated_at: result.updated_at }); });
@@ -404,7 +441,13 @@ wss.on('connection', ws => {
         if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId');
         agentId = message.agentId;
         initialized = true;
-        registry.add(agentId, ws);
+        registry.add(agentId, ws, {
+          hostname: typeof message.hostname === 'string' ? message.hostname : agentId,
+          platform: typeof message.platform === 'string' ? message.platform : 'unknown',
+          username: typeof message.username === 'string' ? message.username : 'unknown',
+          workspace: typeof message.workspace === 'string' ? message.workspace : 'unknown',
+          version: typeof message.version === 'string' ? message.version : 'unknown',
+        });
         console.log(`[agent] connected ${agentId} (${message.hostname})`);
         return;
       }
