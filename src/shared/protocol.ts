@@ -26,6 +26,8 @@ export type AgentHello = {
   agentId: string;
   hostname: string;
   platform: string;
+  username?: string;
+  workspace?: string;
   version: string;
 };
 
