@@ -1021,7 +1021,8 @@ async function takeAdbScreenshot(args: Record<string, unknown>) {
 export async function runCodingTool(tool: string, args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
     case 'get_screen_info': return getScreenInfo();
-    case 'take_screenshot': return takeScreenshot(args);\n    case 'take_adb_screenshot': return takeAdbScreenshot(args);
+    case 'take_screenshot': return takeScreenshot(args);
+    case 'take_adb_screenshot': return takeAdbScreenshot(args);
     case 'read_image_file': return readImageFile(args, workspaceRoot);
     case 'click_mouse': return clickMouse(args);
     case 'move_mouse': return moveMouse(args);
