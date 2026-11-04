@@ -149,6 +149,38 @@ function buildMcpServer() {
     y: z.number().int().min(0),
   }, z.object({ result: z.object({ screenIndex: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), absoluteX: z.number().int(), absoluteY: z.number().int(), r: z.number().int().min(0).max(255), g: z.number().int().min(0).max(255), b: z.number().int().min(0).max(255), hex: z.string(), format: z.string(), note: z.string() }) }));
   
+  server.registerTool('take_adb_screenshot', {
+    description: 'Capture the connected Android phone screen through Android Debug Bridge (ADB) and return the PNG as a native MCP image block. If exactly one authorized device is connected, serial may be omitted; when multiple devices are connected, specify serial from adb devices. Requires adb installed and USB debugging enabled/authorized on the phone.',
+    inputSchema: input({ agentId: agentIdSchema, serial: z.string().trim().min(1).optional() }),
+  }, async ({ agentId, serial, intent }) => {
+    try {
+      const image = await registry.call(agentId, 'take_adb_screenshot', { serial, intent }) as {
+        serial: string; mimeType: string; width: number; height: number; data: string; dataBytes: number; dataSha256: string;
+      };
+      if (!image || image.mimeType !== 'image/png' || !image.data || !/^[A-Za-z0-9+/]+={0,2}$/u.test(image.data)) {
+        throw new Error('Agent returned invalid ADB screenshot image data');
+      }
+      const bytes = Buffer.from(image.data, 'base64');
+      const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      if (bytes.length !== image.dataBytes || bytes.length > 20 * 1024 * 1024 || bytes.length < 24 || !bytes.subarray(0, 8).equals(pngSignature)) {
+        throw new Error('ADB screenshot PNG byte length/signature is invalid or exceeds 20 MiB');
+      }
+      const width = bytes.readUInt32BE(16);
+      const height = bytes.readUInt32BE(20);
+      if (width !== image.width || height !== image.height || width < 1 || height < 1) throw new Error('ADB screenshot dimensions do not match PNG metadata');
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== image.dataSha256) throw new Error('ADB screenshot SHA-256 mismatch');
+      return { content: [
+        { type: 'text' as const, text: JSON.stringify({ serial: image.serial, mimeType: image.mimeType, width, height, dataBytes: bytes.length, dataSha256: digest }, null, 2) },
+        { type: 'image' as const, data: image.data, mimeType: 'image/png' },
+      ] };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'take_adb_screenshot', message });
+      throw new Error(`take_adb_screenshot failed: ${message}`);
+    }
+  });
+
   server.registerTool('take_screenshot', {
     description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Pass highlightCursor=true to visually emphasize the mouse cursor position on the captured image. Returns current mouse cursor coordinates. Call get_screen_info for display indices and bounds.',
     inputSchema: input({
