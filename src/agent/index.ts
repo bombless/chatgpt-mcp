@@ -44,7 +44,7 @@ getConfig().then(config => {
 
   const AGENT_WORKSPACE = path.resolve(
     process.env.AGENT_WORKSPACE ??
-      (IS_LINUX ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace')
+      (IS_LINUX ? path.join(os.homedir(), 'mcp-agent-workspace') : 'D:\\mcp-agent-workspace')
   )
 
   function assertAllowed (target: string, operation: string) {
