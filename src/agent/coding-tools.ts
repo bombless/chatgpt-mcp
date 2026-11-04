@@ -969,11 +969,11 @@ async function takeAdbScreenshot(args: Record<string, unknown>) {
     timeout: 15000,
     maxBuffer: MAX_OUTPUT_BYTES,
   });
-  const devices = deviceOutput.split(/\\r?\\n/u).slice(1)
+  const devices = deviceOutput.split(/\r?\n/u).slice(1)
     .map(line => line.trim())
     .filter(Boolean)
     .map(line => {
-      const [serial, state] = line.split(/\\s+/u);
+      const [serial, state] = line.split(/\s+/u);
       return { serial, state };
     });
   const online = devices.filter(device => device.state === 'device');
