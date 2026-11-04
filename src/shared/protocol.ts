@@ -44,7 +44,7 @@ export type ToolName =
   | 'execute_bash'
   | 'get_system_info'
   | 'get_screen_info'
-  | 'take_screenshot'
+  | 'take_screenshot'\n  | 'take_adb_screenshot'
   | 'read_image_file'
   | 'click_mouse'
   | 'move_mouse'
