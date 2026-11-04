@@ -228,6 +228,8 @@ getConfig().then(config => {
           agentId: AGENT_ID,
           hostname: os.hostname(),
           platform: process.platform,
+          username: os.userInfo().username,
+          workspace: AGENT_WORKSPACE,
           version: AGENT_VERSION
         })
       )
