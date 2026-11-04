@@ -219,7 +219,7 @@ $env:CDP_TIMEOUT_MS="30000"
 npm run agent
 ```
 
-`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace` on Windows and `~/mcp-agent-workspace` on Linux. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
+`ALLOW_COMMAND_EXECUTION` defaults to `false`. `AGENT_WORKSPACE` defaults to `D:\mcp-agent-workspace` on Windows and `~` on Linux. CDP is enabled by default and uses the fixed local endpoint `127.0.0.1:9222`; `CDP_TIMEOUT_MS` controls the per-call WebSocket timeout.
 
 For Chrome/Chromium, start the browser with remote debugging enabled on port 9222, for example:
 
