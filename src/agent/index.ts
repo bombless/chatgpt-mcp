@@ -42,7 +42,7 @@ getConfig().then(config => {
 
   if (!AGENT_TOKEN) throw new Error('AGENT_TOKEN must be set')
 
-  const WORKSPACE_ROOT = path.resolve(
+  const AGENT_WORKSPACE = path.resolve(
     process.env.AGENT_WORKSPACE ??
       (IS_LINUX ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace')
   )
@@ -51,8 +51,8 @@ getConfig().then(config => {
     const resolved = path.resolve(target)
     const normalizedResolved = IS_WINDOWS ? resolved.toLowerCase() : resolved
     const normalizedRoot = IS_WINDOWS
-      ? WORKSPACE_ROOT.toLowerCase()
-      : WORKSPACE_ROOT
+      ? AGENT_WORKSPACE.toLowerCase()
+      : AGENT_WORKSPACE
     const ok =
       normalizedResolved === normalizedRoot ||
       normalizedResolved.startsWith(normalizedRoot + path.sep)
@@ -188,11 +188,11 @@ getConfig().then(config => {
           platform: process.platform,
           arch: process.arch,
           release: os.release(),
-          workspace: WORKSPACE_ROOT,
+          workspace: AGENT_WORKSPACE,
           commandExecutionEnabled: ALLOW_COMMAND_EXECUTION
         }
       default:
-        return runCodingTool(request.tool, request.args, logCommand)
+        return runCodingTool(request.tool, request.args, AGENT_WORKSPACE, logCommand)
     }
   }
 
@@ -297,7 +297,7 @@ getConfig().then(config => {
         : process.platform
     }`
   )
-  console.log(`[agent] workspace: ${WORKSPACE_ROOT}`)
+  console.log(`[agent] workspace: ${AGENT_WORKSPACE}`)
   console.log(
     `[agent] command execution: ${
       ALLOW_COMMAND_EXECUTION ? 'ENABLED' : 'DISABLED'

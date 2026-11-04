@@ -15,7 +15,6 @@ let allowCommandExecution = process.env.ALLOW_COMMAND_EXECUTION === 'true';
 export function setCommandExecutionEnabled(enabled: boolean): void {
   allowCommandExecution = enabled;
 }
-const WORKSPACE_ROOT = path.resolve(process.env.AGENT_WORKSPACE ?? (process.platform === 'linux' ? '/tmp/mcp-agent-workspace' : 'D:\\mcp-agent-workspace'));
 
 type CommandLogger = (command: string, cwd?: string) => void;
 type PythonJobStatus = 'running' | 'exited' | 'failed' | 'killed';
@@ -40,9 +39,9 @@ type PythonJob = {
 
 const pythonJobs = new Map<string, PythonJob>();
 
-export function assertAllowed(target: string): string {
+export function assertAllowed(target: string, workspaceRoot: string): string {
   const resolved = path.resolve(target);
-  const root = process.platform === 'win32' ? WORKSPACE_ROOT.toLowerCase() : WORKSPACE_ROOT;
+  const root = process.platform === 'win32' ? workspaceRoot.toLowerCase() : workspaceRoot;
   const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
   if (normalized !== root && !normalized.startsWith(root + path.sep)) throw new Error(`Path is outside agent workspace: ${resolved}`);
   return resolved;
@@ -80,10 +79,10 @@ export function getProxyInfo(env: NodeJS.ProcessEnv = process.env): ProxyInfo {
   return { configured: Boolean(http || https || all), proxies: { http, https, all }, noProxy };
 }
 
-async function readImageFile(args: Record<string, unknown>) {
+async function readImageFile(args: Record<string, unknown>, workspaceRoot: string) {
   const requestedPath = stringArg(args, 'path');
   if (!path.isAbsolute(requestedPath)) throw new Error('path must be an absolute file path');
-  const file = assertAllowed(await fs.realpath(requestedPath));
+  const file = assertAllowed(await fs.realpath(requestedPath), workspaceRoot);
   const stat = await fs.stat(file);
   if (!stat.isFile()) throw new Error(`Path is not a regular file: ${file}`);
   const maxBytes = 20 * 1024 * 1024;
@@ -137,8 +136,8 @@ function sha256(content: Buffer | string) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
-async function editFile(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
+async function editFile(args: Record<string, unknown>, workspaceRoot: string) {
+  const file = assertAllowed(stringArg(args, 'path'), workspaceRoot);
   const oldText = stringArg(args, 'oldText');
   const newText = typeof args.newText === 'string' ? args.newText : undefined;
   if (newText === undefined) throw new Error('newText must be a string');
@@ -193,8 +192,8 @@ async function editFile(args: Record<string, unknown>) {
   };
 }
 
-async function exec(command: string, args: string[], cwd?: string, timeout = COMMAND_TIMEOUT_MS, logCommand?: CommandLogger) {
-  const workingDirectory = cwd ? assertAllowed(cwd) : WORKSPACE_ROOT;
+async function exec(command: string, args: string[], workspaceRoot: string, cwd?: string, timeout = COMMAND_TIMEOUT_MS, logCommand?: CommandLogger) {
+  const workingDirectory = cwd ? assertAllowed(cwd, workspaceRoot) : workspaceRoot;
   logCommand?.([command, ...args].map(arg => /\s|["']/u.test(arg) ? JSON.stringify(arg) : arg).join(' '), workingDirectory);
   const result = await execFileAsync(command, args, { cwd: workingDirectory, windowsHide: true, timeout, maxBuffer: MAX_OUTPUT_BYTES, shell: false });
   return { stdout: result.stdout, stderr: result.stderr, code: 0 };
@@ -215,10 +214,10 @@ function pythonExecutable() {
   return process.platform === 'win32' ? 'python.exe' : 'python';
 }
 
-function spawnPythonJob(args: Record<string, unknown>, logCommand?: CommandLogger) {
+function spawnPythonJob(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   requireCommandExecution();
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
-  const workingDirectory = assertAllowed(cwd);
+  const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
+  const workingDirectory = assertAllowed(cwd, workspaceRoot);
   const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
   const executable = pythonExecutable();
   const commandLine = [executable, ...commandArgs].map(arg => /\s|["']/u.test(arg) ? JSON.stringify(arg) : arg).join(' ');
@@ -305,7 +304,7 @@ function inspectPythonJob(args: Record<string, unknown>) {
   return publicJob(job);
 }
 
-async function killPythonJob(args: Record<string, unknown>) {
+async function killPythonJob(args: Record<string, unknown>, workspaceRoot: string) {
   requireCommandExecution();
   const jobId = stringArg(args, 'jobId');
   const job = pythonJobs.get(jobId);
@@ -313,7 +312,7 @@ async function killPythonJob(args: Record<string, unknown>) {
   if (job.status !== 'running') return publicJob(job);
 
   if (process.platform === 'win32') {
-    await exec('taskkill.exe', ['/PID', String(job.pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS);
+    await exec('taskkill.exe', ['/PID', String(job.pid), '/T', '/F'], workspaceRoot, workspaceRoot, COMMAND_TIMEOUT_MS);
   } else {
     job.child.kill('SIGTERM');
   }
@@ -325,9 +324,9 @@ function listPythonJobs() {
   return [...pythonJobs.values()].map(publicJob).sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }
 
-async function command(name: 'npm' | 'python' | 'node', args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function command(name: 'npm' | 'python' | 'node', args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   requireCommandExecution();
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
+  const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
   const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
 
   // npm is a .cmd wrapper on Windows. Node's execFile/spawn cannot execute
@@ -342,11 +341,11 @@ async function command(name: 'npm' | 'python' | 'node', args: Record<string, unk
     ? [path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...commandArgs]
     : commandArgs;
 
-  try { return await exec(executable, executableArgs, cwd, COMMAND_TIMEOUT_MS, logCommand); }
+  try { return await exec(executable, executableArgs, workspaceRoot, cwd, COMMAND_TIMEOUT_MS, logCommand); }
   catch (error: any) { return { stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message ?? error), code: typeof error.status === 'number' ? error.status : 1 }; }
 }
 
-async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init', args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init', args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   const supplied = Array.isArray(args.args) ? args.args.map(String) : [];
   let commandArgs: string[];
   switch (tool) {
@@ -366,33 +365,33 @@ async function runNpmTool(tool: 'npm_test' | 'npm_run' | 'npm_install' | 'npm_in
       commandArgs = ['init', ...supplied];
       break;
   }
-  return command('npm', { ...args, args: commandArgs }, logCommand);
+  return command('npm', { ...args, args: commandArgs }, workspaceRoot, logCommand);
 }
 
-async function runGradleTool(tool: 'gradle_assemble_debug' | 'gradle_install_debug', args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function runGradleTool(tool: 'gradle_assemble_debug' | 'gradle_install_debug', args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   requireCommandExecution();
   const task = tool === 'gradle_assemble_debug' ? 'assembleDebug' : 'installDebug';
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
+  const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
   if (process.platform === 'win32') {
-    return await exec('cmd.exe', ['/d', '/s', '/c', `gradle.bat ${task}`], cwd, COMMAND_TIMEOUT_MS, logCommand);
+    return await exec('cmd.exe', ['/d', '/s', '/c', `gradle.bat ${task}`], workspaceRoot, cwd, COMMAND_TIMEOUT_MS, logCommand);
   }
-  return await exec('gradle', [task], cwd, COMMAND_TIMEOUT_MS, logCommand);
+  return await exec('gradle', [task], workspaceRoot, cwd, COMMAND_TIMEOUT_MS, logCommand);
 }
 
-async function runPython(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  if (args.async === true) return spawnPythonJob(args, logCommand);
-  return command('python', args, logCommand);
+async function runPython(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
+  if (args.async === true) return spawnPythonJob(args, workspaceRoot, logCommand);
+  return command('python', args, workspaceRoot, logCommand);
 }
 
-async function rg(args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function rg(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   const query = stringArg(args, 'query');
-  const cwd = args.cwd ? assertAllowed(stringArg(args, 'cwd')) : WORKSPACE_ROOT;
+  const cwd = args.cwd ? assertAllowed(stringArg(args, 'cwd'), workspaceRoot) : workspaceRoot;
   const limit = Math.max(1, Math.min(MAX_SEARCH_RESULTS, Number(args.maxResults ?? MAX_SEARCH_RESULTS)));
   const rgArgs = ['--line-number', '--column', '--color', 'never', '--no-heading', '--hidden', '--glob', '!.git/**', '--max-count', String(limit)];
   if (args.ignoreCase === true) rgArgs.push('--ignore-case');
   if (typeof args.glob === 'string' && args.glob) rgArgs.push('--glob', args.glob);
   rgArgs.push(query, '.');
-  try { return { ...(await exec('rg', rgArgs, cwd, COMMAND_TIMEOUT_MS, logCommand)), matches: true, truncated: false }; }
+  try { return { ...(await exec('rg', rgArgs, workspaceRoot, cwd, COMMAND_TIMEOUT_MS, logCommand)), matches: true, truncated: false }; }
   catch (error: any) {
     const code = typeof error.code === 'number' ? error.code : 1;
     if (code === 1) return { stdout: '', stderr: '', code: 1, matches: false, truncated: false };
@@ -400,17 +399,17 @@ async function rg(args: Record<string, unknown>, logCommand?: CommandLogger) {
   }
 }
 
-async function findFiles(args: Record<string, unknown>, logCommand?: CommandLogger) {
-  const root = args.cwd ? assertAllowed(stringArg(args, 'cwd')) : WORKSPACE_ROOT;
+async function findFiles(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
+  const root = args.cwd ? assertAllowed(stringArg(args, 'cwd'), workspaceRoot) : workspaceRoot;
   const pattern = typeof args.pattern === 'string' && args.pattern ? args.pattern : '**/*';
   const maxResults = Math.max(1, Math.min(MAX_SEARCH_RESULTS, Number(args.maxResults ?? MAX_SEARCH_RESULTS)));
-  const result = await exec('rg', ['--files', '--hidden', '--glob', '!.git/**', '--glob', pattern], root, COMMAND_TIMEOUT_MS, logCommand);
+  const result = await exec('rg', ['--files', '--hidden', '--glob', '!.git/**', '--glob', pattern], workspaceRoot, root, COMMAND_TIMEOUT_MS, logCommand);
   const files = result.stdout.split(/\r?\n/).filter(Boolean).slice(0, maxResults);
   return { files, truncated: files.length >= maxResults, count: files.length };
 }
 
-async function readFileRange(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
+async function readFileRange(args: Record<string, unknown>, workspaceRoot: string) {
+  const file = assertAllowed(stringArg(args, 'path'), workspaceRoot);
   const start = Math.max(1, Number(args.startLine ?? 1));
   const end = Math.max(start, Number(args.endLine ?? start + 199));
   const bytes = await fs.readFile(file);
@@ -419,29 +418,29 @@ async function readFileRange(args: Record<string, unknown>) {
   return { path: file, content: lines.map((line, i) => `${start + i}: ${line}`).join('\n'), sha256: sha256(bytes), bytes: bytes.length };
 }
 
-async function tailFile(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
+async function tailFile(args: Record<string, unknown>, workspaceRoot: string) {
+  const file = assertAllowed(stringArg(args, 'path'), workspaceRoot);
   const lines = Math.max(1, Number(args.lines ?? 100));
   const bytes = await fs.readFile(file);
   const content = bytes.toString('utf8');
   return { path: file, content: content.split(/\r?\n/).slice(-lines).join('\n'), sha256: sha256(bytes), bytes: bytes.length };
 }
 
-async function fileInfo(args: Record<string, unknown>) {
-  const file = assertAllowed(stringArg(args, 'path'));
+async function fileInfo(args: Record<string, unknown>, workspaceRoot: string) {
+  const file = assertAllowed(stringArg(args, 'path'), workspaceRoot);
   const stat = await fs.stat(file);
   return { path: file, type: stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'other', size: stat.size, mtime: stat.mtime.toISOString(), mode: stat.mode };
 }
 
-async function createDirectory(args: Record<string, unknown>) {
-  const directory = assertAllowed(stringArg(args, 'path'));
+async function createDirectory(args: Record<string, unknown>, workspaceRoot: string) {
+  const directory = assertAllowed(stringArg(args, 'path'), workspaceRoot);
   await fs.mkdir(directory, { recursive: true });
   return { ok: true, path: directory };
 }
 
-async function copyFile(args: Record<string, unknown>) {
-  const source = assertAllowed(stringArg(args, 'source'));
-  const destination = assertAllowed(stringArg(args, 'destination'));
+async function copyFile(args: Record<string, unknown>, workspaceRoot: string) {
+  const source = assertAllowed(stringArg(args, 'source'), workspaceRoot);
+  const destination = assertAllowed(stringArg(args, 'destination'), workspaceRoot);
   const expectedSourceSha256 = stringArg(args, 'expectedSourceSha256').toLowerCase();
   if (!/^[a-f0-9]{64}$/u.test(expectedSourceSha256)) throw new Error('expectedSourceSha256 must be a 64-character SHA-256 hex string');
   const sourceBytes = await fs.readFile(source);
@@ -467,36 +466,36 @@ async function copyFile(args: Record<string, unknown>) {
   return { ok: true, source, destination, sha256Source: sourceSha256, sha256Before: beforeDestinationSha256, sha256After: sourceSha256 };
 }
 
-async function processList(logCommand?: CommandLogger) {
-  if (process.platform === 'win32') return await exec('tasklist', ['/FO', 'CSV', '/NH'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand);
-  return await exec('ps', ['-eo', 'pid,ppid,comm,args'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand);
+async function processList(workspaceRoot: string, logCommand?: CommandLogger) {
+  if (process.platform === 'win32') return await exec('tasklist', ['/FO', 'CSV', '/NH'], workspaceRoot, workspaceRoot, COMMAND_TIMEOUT_MS, logCommand);
+  return await exec('ps', ['-eo', 'pid,ppid,comm,args'], workspaceRoot, workspaceRoot, COMMAND_TIMEOUT_MS, logCommand);
 }
 
-async function killProcess(args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function killProcess(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   requireCommandExecution();
   const pid = Number(args.pid);
   if (!Number.isInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
   if (pid === process.pid) throw new Error('Refusing to terminate the agent process');
-  if (process.platform === 'win32') await exec('taskkill', ['/PID', String(pid), '/T', '/F'], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand); else await exec('kill', ['-TERM', String(pid)], WORKSPACE_ROOT, COMMAND_TIMEOUT_MS, logCommand);
+  if (process.platform === 'win32') await exec('taskkill', ['/PID', String(pid), '/T', '/F'], workspaceRoot, workspaceRoot, COMMAND_TIMEOUT_MS, logCommand); else await exec('kill', ['-TERM', String(pid)], workspaceRoot, workspaceRoot, COMMAND_TIMEOUT_MS, logCommand);
   return { ok: true, pid };
 }
 
-async function git(args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function git(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   requireCommandExecution();
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
+  const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
   const gitArgs = Array.isArray(args.args) ? args.args.map(String) : [];
   if (!gitArgs.length) throw new Error('args must contain a git subcommand');
-  return await exec(process.platform === 'win32' ? 'git.exe' : 'git', gitArgs, cwd, COMMAND_TIMEOUT_MS, logCommand);
+  return await exec(process.platform === 'win32' ? 'git.exe' : 'git', gitArgs, workspaceRoot, cwd, COMMAND_TIMEOUT_MS, logCommand);
 }
 
-async function applyPatch(args: Record<string, unknown>, logCommand?: CommandLogger) {
+async function applyPatch(args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
   requireCommandExecution();
   const patch = stringArg(args, 'patch');
-  const cwd = args.cwd ? stringArg(args, 'cwd') : WORKSPACE_ROOT;
-  const temp = path.join(WORKSPACE_ROOT, `.mcp-patch-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`);
+  const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
+  const temp = path.join(workspaceRoot, `.mcp-patch-${Date.now()}-${Math.random().toString(16).slice(2)}.patch`);
   try {
     await fs.writeFile(temp, patch, 'utf8');
-    return await exec(process.platform === 'win32' ? 'git.exe' : 'git', ['apply', '--whitespace=nowarn', temp], cwd, COMMAND_TIMEOUT_MS, logCommand);
+    return await exec(process.platform === 'win32' ? 'git.exe' : 'git', ['apply', '--whitespace=nowarn', temp], workspaceRoot, cwd, COMMAND_TIMEOUT_MS, logCommand);
   } finally { await fs.rm(temp, { force: true }); }
 }
 
@@ -963,38 +962,38 @@ async function scrollMouse(args: Record<string, unknown>) {
   };
 }
 
-export async function runCodingTool(tool: string, args: Record<string, unknown>, logCommand?: CommandLogger): Promise<unknown> {
+export async function runCodingTool(tool: string, args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger): Promise<unknown> {
   switch (tool) {
     case 'get_screen_info': return getScreenInfo();
     case 'take_screenshot': return takeScreenshot(args);
-    case 'read_image_file': return readImageFile(args);
+    case 'read_image_file': return readImageFile(args, workspaceRoot);
     case 'click_mouse': return clickMouse(args);
     case 'move_mouse': return moveMouse(args);
     case 'scroll_mouse': return scrollMouse(args);
     case 'get_screen_pixel': return getScreenPixel(args);
-    case 'npm_test': return runNpmTool('npm_test', args, logCommand);
-    case 'npm_run': return runNpmTool('npm_run', args, logCommand);
-    case 'npm_install': return runNpmTool('npm_install', args, logCommand);
-    case 'npm_init': return runNpmTool('npm_init', args, logCommand);
-    case 'gradle_assemble_debug': return runGradleTool('gradle_assemble_debug', args, logCommand);
-    case 'gradle_install_debug': return runGradleTool('gradle_install_debug', args, logCommand);
-    case 'run_python': return runPython(args, logCommand);
+    case 'npm_test': return runNpmTool('npm_test', args, workspaceRoot, logCommand);
+    case 'npm_run': return runNpmTool('npm_run', args, workspaceRoot, logCommand);
+    case 'npm_install': return runNpmTool('npm_install', args, workspaceRoot, logCommand);
+    case 'npm_init': return runNpmTool('npm_init', args, workspaceRoot, logCommand);
+    case 'gradle_assemble_debug': return runGradleTool('gradle_assemble_debug', args, workspaceRoot, logCommand);
+    case 'gradle_install_debug': return runGradleTool('gradle_install_debug', args, workspaceRoot, logCommand);
+    case 'run_python': return runPython(args, workspaceRoot, logCommand);
     case 'python_job_inspect': return inspectPythonJob(args);
-    case 'python_job_kill': return killPythonJob(args);
+    case 'python_job_kill': return killPythonJob(args, workspaceRoot);
     case 'python_jobs': return listPythonJobs();
-    case 'run_node': return command('node', args, logCommand);
-    case 'read_file_range': return readFileRange(args);
-    case 'tail_file': return tailFile(args);
-    case 'get_file_info': return fileInfo(args);
-    case 'create_directory': return createDirectory(args);
-    case 'copy_file': return copyFile(args);
-    case 'process_list': return processList(logCommand);
-    case 'kill_process': return killProcess(args, logCommand);
-    case 'rg': return rg(args, logCommand);
-    case 'git': return git(args, logCommand);
-    case 'apply_patch': return applyPatch(args, logCommand);
-    case 'edit_file': return editFile(args);
-    case 'find_files': return findFiles(args, logCommand);
+    case 'run_node': return command('node', args, workspaceRoot, logCommand);
+    case 'read_file_range': return readFileRange(args, workspaceRoot);
+    case 'tail_file': return tailFile(args, workspaceRoot);
+    case 'get_file_info': return fileInfo(args, workspaceRoot);
+    case 'create_directory': return createDirectory(args, workspaceRoot);
+    case 'copy_file': return copyFile(args, workspaceRoot);
+    case 'process_list': return processList(workspaceRoot, logCommand);
+    case 'kill_process': return killProcess(args, workspaceRoot, logCommand);
+    case 'rg': return rg(args, workspaceRoot, logCommand);
+    case 'git': return git(args, workspaceRoot, logCommand);
+    case 'apply_patch': return applyPatch(args, workspaceRoot, logCommand);
+    case 'edit_file': return editFile(args, workspaceRoot);
+    case 'find_files': return findFiles(args, workspaceRoot, logCommand);
     case 'get_proxy_info': return getProxyInfo();
     case 'cdp_version': return cdpVersion();
     case 'cdp_list_targets': return cdpListTargets();

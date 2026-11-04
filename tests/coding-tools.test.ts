@@ -12,10 +12,10 @@ const { runCodingTool, setCommandExecutionEnabled } = await import('../src/agent
 
 // The resolved secure configuration must override the module's environment default.
 setCommandExecutionEnabled(false);
-await assert.rejects(() => runCodingTool('run_node', { args: ['-e', 'console.log(1)'] }), /Command execution is disabled/);
+await assert.rejects(() => runCodingTool('run_node', { args: ['-e', 'console.log(1)'] }, root), /Command execution is disabled/);
 setCommandExecutionEnabled(true);
 
-const call = (tool: string, args: Record<string, unknown> = {}) => runCodingTool(tool, args);
+const call = (tool: string, args: Record<string, unknown> = {}) => runCodingTool(tool, args, root);
 const file = path.join(root, 'sample.txt');
 const copy = path.join(root, 'sample-copy.txt');
 const nested = path.join(root, 'nested');

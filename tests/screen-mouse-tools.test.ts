@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runCodingTool } from '../src/agent/coding-tools.js';
 
+const call = (tool: string, args: Record<string, unknown> = {}) => runCodingTool(tool, args, process.cwd());
+
 test('take_screenshot returns cursor coordinates and supports highlightCursor', async () => {
-  const result = await runCodingTool('take_screenshot', {
+  const result = await call('take_screenshot', {
     screenIndex: 0,
     highlightCursor: true,
   }) as any;
@@ -28,7 +30,7 @@ test('take_screenshot returns cursor coordinates and supports highlightCursor', 
 });
 
 test('click_mouse clicks without moving when x and y are omitted', async () => {
-  const result = await runCodingTool('click_mouse', {
+  const result = await call('click_mouse', {
     button: 'left',
   }) as any;
 
@@ -43,19 +45,19 @@ test('click_mouse clicks without moving when x and y are omitted', async () => {
 test('click_mouse validates coordinate parameters', async () => {
   // Only x provided, y missing
   await assert.rejects(
-    () => runCodingTool('click_mouse', { x: 100 }),
+    () => call('click_mouse', { x: 100 }),
     /Both x and y must be provided, or both omitted/
   );
 
   // Out of bounds screenIndex
   await assert.rejects(
-    () => runCodingTool('click_mouse', { screenIndex: 999 }),
+    () => call('click_mouse', { screenIndex: 999 }),
     /No display found for screenIndex=999/
   );
 });
 
 test('move_mouse moves cursor to specified coordinates', async () => {
-  const result = await runCodingTool('move_mouse', {
+  const result = await call('move_mouse', {
     screenIndex: 0,
     x: 120,
     y: 140,
@@ -73,31 +75,31 @@ test('move_mouse moves cursor to specified coordinates', async () => {
 test('move_mouse validates coordinate parameters', async () => {
   // Missing y
   await assert.rejects(
-    () => runCodingTool('move_mouse', { x: 100 }),
+    () => call('move_mouse', { x: 100 }),
     /Both x and y must be provided to move the mouse cursor/
   );
 
   // Missing both x and y
   await assert.rejects(
-    () => runCodingTool('move_mouse', {}),
+    () => call('move_mouse', {}),
     /Both x and y must be provided to move the mouse cursor/
   );
 
   // Out of bounds screenIndex
   await assert.rejects(
-    () => runCodingTool('move_mouse', { screenIndex: 999, x: 10, y: 10 }),
+    () => call('move_mouse', { screenIndex: 999, x: 10, y: 10 }),
     /No display found for screenIndex=999/
   );
 
   // Negative coordinates with screenIndex
   await assert.rejects(
-    () => runCodingTool('move_mouse', { screenIndex: 0, x: -5, y: 10 }),
+    () => call('move_mouse', { screenIndex: 0, x: -5, y: 10 }),
     /must be within display 0 bounds/
   );
 });
 
 test('scroll_mouse scrolls without moving when x and y are omitted', async () => {
-  const result = await runCodingTool('scroll_mouse', {
+  const result = await call('scroll_mouse', {
     direction: 'down',
     amount: 2,
   }) as any;
@@ -111,7 +113,7 @@ test('scroll_mouse scrolls without moving when x and y are omitted', async () =>
 });
 
 test('scroll_mouse moves and scrolls when coordinates are provided', async () => {
-  const result = await runCodingTool('scroll_mouse', {
+  const result = await call('scroll_mouse', {
     screenIndex: 0,
     x: 160,
     y: 180,
@@ -129,14 +131,14 @@ test('scroll_mouse moves and scrolls when coordinates are provided', async () =>
 });
 
 test('scroll_mouse handles deltaY and deltaX', async () => {
-  const resultY = await runCodingTool('scroll_mouse', {
+  const resultY = await call('scroll_mouse', {
     deltaY: -3,
   }) as any;
   assert.ok(resultY);
   assert.equal(resultY.direction, 'up');
   assert.equal(resultY.amount, 3);
 
-  const resultX = await runCodingTool('scroll_mouse', {
+  const resultX = await call('scroll_mouse', {
     deltaX: 4,
   }) as any;
   assert.ok(resultX);
@@ -147,13 +149,13 @@ test('scroll_mouse handles deltaY and deltaX', async () => {
 test('scroll_mouse validates coordinate parameters', async () => {
   // Only x provided, y missing
   await assert.rejects(
-    () => runCodingTool('scroll_mouse', { x: 100 }),
+    () => call('scroll_mouse', { x: 100 }),
     /Both x and y must be provided, or both omitted/
   );
 
   // Out of bounds screenIndex
   await assert.rejects(
-    () => runCodingTool('scroll_mouse', { screenIndex: 999 }),
+    () => call('scroll_mouse', { screenIndex: 999 }),
     /No display found for screenIndex=999/
   );
 });
