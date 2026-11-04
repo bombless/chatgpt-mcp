@@ -55,7 +55,7 @@ Gradle is exposed as separate, fixed-task tools. Use `gradle_assemble_debug` for
 ### Screen / Mouse
 
 - `get_screen_info`
-- `take_screenshot`
+- `take_screenshot`\n- `take_adb_screenshot`
 - `get_screen_pixel`
 - `click_mouse`
 - `move_mouse`
