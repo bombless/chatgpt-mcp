@@ -449,6 +449,27 @@ adminApp.use((req, res, next) => {
 });
 
 adminApp.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
+adminApp.get('/_admin/agents', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  res.json({ agents: await registry.listWithCapabilities() });
+});
+const adminAgentTools = [
+  'read_file','write_file','edit_file','list_directory','move_file','delete_file','execute_powershell','execute_bash','get_system_info','get_agent_capabilities','get_screen_info','take_screenshot','take_adb_screenshot','read_image_file','click_mouse','move_mouse','scroll_mouse','get_screen_pixel','npm_test','npm_run','npm_install','npm_init','gradle_assemble_debug','gradle_install_debug','run_python','python_job_inspect','python_job_kill','python_jobs','run_node','read_file_range','tail_file','get_file_info','create_directory','copy_file','process_list','kill_process','rg','git','find_files','get_proxy_info','cdp_version','cdp_list_targets','cdp_call'
+] as const;
+const adminToolAliases: Record<string, { tool: ToolName; args: (args: Record<string, unknown>) => Record<string, unknown> }> = {
+  git_status: { tool: 'git', args: a => ({ ...a, args: ['status', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_diff: { tool: 'git', args: a => ({ ...a, args: ['diff', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_log: { tool: 'git', args: a => ({ ...a, args: ['log', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_show: { tool: 'git', args: a => ({ ...a, args: ['show', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_blame: { tool: 'git', args: a => ({ ...a, args: ['blame', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_branch: { tool: 'git', args: a => ({ ...a, args: ['branch', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_add: { tool: 'git', args: a => ({ ...a, args: ['add', ...(Array.isArray(a.args) ? a.args : [])] }) },
+  git_commit: { tool: 'git', args: a => ({ ...a, args: ['commit', ...(Array.isArray(a.args) ? a.args : [])] }) },
+};
+adminApp.get('/_admin/tools', (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  res.json({ tools: [...adminAgentTools, ...Object.keys(adminToolAliases)] });
+});
 
 adminApp.get('/', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
@@ -480,10 +501,15 @@ adminApp.post('/_admin/call', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   try {
     const { tool, args } = req.body ?? {};
-    if (!['list_directory', 'read_file', 'write_file', 'get_system_info'].includes(tool)) {
-      return res.status(400).json({ error: 'tool not allowed in admin UI' });
-    }
-    const result = await registry.call(String(args.agentId), tool as ToolName, args);
+    if (typeof tool !== 'string' || !args || typeof args !== 'object' || Array.isArray(args)) return res.status(400).json({ error: 'tool and JSON object args are required' });
+    const alias = adminToolAliases[tool];
+    const allowed = (adminAgentTools as readonly string[]).includes(tool);
+    if (!allowed && !alias) return res.status(400).json({ error: 'tool not available in admin runner' });
+    const agentId = String(args.agentId ?? '');
+    if (!agentId) return res.status(400).json({ error: 'agentId is required' });
+    const result = alias
+      ? await registry.call(agentId, alias.tool, alias.args(args))
+      : await registry.call(agentId, tool as ToolName, args);
     res.json({ ok: true, result });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) });
