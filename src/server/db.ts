@@ -37,7 +37,13 @@ async function persist(db: DbState) {
 async function loadDb(): Promise<DbState> {
   try {
     await access(DB_PATH);
-    const parsed = JSON.parse(await readFile(DB_PATH, 'utf8')) as Partial<DbState>;
+    const content = (await readFile(DB_PATH, 'utf8')).trim();
+    if (!content) {
+      const db = emptyDb();
+      await persist(db);
+      return db;
+    }
+    const parsed = JSON.parse(content) as Partial<DbState>;
     return {
       ...emptyDb(),
       ...parsed,

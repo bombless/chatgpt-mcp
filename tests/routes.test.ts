@@ -8,23 +8,35 @@ const serverSource = readFileSync(resolve(projectRoot, 'src/server/index.ts'), '
 const adminHtml = readFileSync(resolve(projectRoot, 'src/server/admin.html'), 'utf8');
 const adminApp = readFileSync(resolve(projectRoot, 'src/server/admin/App.vue'), 'utf8');
 
-const routes = [
-  ['GET', '/'], ['GET', '/healthz'], ['GET', '/.well-known/oauth-authorization-server'],
+const mcpRoutes = [
+  ['GET', '/healthz'], ['GET', '/.well-known/oauth-authorization-server'],
   ['GET', '/.well-known/oauth-protected-resource'], ['POST', '/oauth/register'],
   ['GET', '/oauth/authorize'], ['POST', '/oauth/authorize/approve'], ['POST', '/oauth/token'],
-  ['GET', '/agents'], ['GET', '/_admin/totp'], ['POST', '/_admin/call'], ['ALL', '/mcp'],
+  ['GET', '/agents'], ['ALL', '/mcp'],
 ] as const;
 
-for (const [method, path] of routes) {
-  test(`route exists: ${method} ${path}`, () => {
+const adminRoutes = [
+  ['GET', '/'], ['GET', '/healthz'], ['GET', '/_admin/totp'], ['POST', '/_admin/call'],
+] as const;
+
+for (const [method, path] of mcpRoutes) {
+  test(`MCP route exists: ${method} ${path}`, () => {
     const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const declaration = new RegExp(`app\\.${method.toLowerCase()}\\(['"]${escapedPath}['"]`);
-    assert.match(serverSource, declaration, `Missing ${method} ${path} route in src/server/index.ts`);
+    assert.match(serverSource, declaration, `Missing app.${method} ${path} route in src/server/index.ts`);
   });
 }
 
-test('root route serves the Vite-built Vue admin entry', () => {
-  assert.match(serverSource, /app\.get\(['"]\/['"],\s*async\s*\(req,\s*res\)/);
+for (const [method, path] of adminRoutes) {
+  test(`Admin route exists: ${method} ${path}`, () => {
+    const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const declaration = new RegExp(`adminApp\\.${method.toLowerCase()}\\(['"]${escapedPath}['"]`);
+    assert.match(serverSource, declaration, `Missing adminApp.${method} ${path} route in src/server/index.ts`);
+  });
+}
+
+test('root route serves the Vite-built Vue admin entry on adminApp', () => {
+  assert.match(serverSource, /adminApp\.get\(['"]\/['"],\s*async\s*\(req,\s*res\)/);
   assert.match(serverSource, /readFileSync\(resolve\(__dirname,\s*['"]admin-ui\/admin\.html['"]\),\s*['"]utf8['"]\)\)/);
   assert.match(serverSource, /express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\)/);
   assert.match(adminHtml, /<title>ChatGPT MCP · Gateway Console<\/title>/);
@@ -51,6 +63,6 @@ test('admin test-tool defaults are derived from the selected agent workspace', (
 
 test('local admin endpoints keep the loopback-only guard', () => {
   assert.match(serverSource, /function isLocalAdminRequest[\s\S]*?return loopback && !fromCaddy/);
-  assert.match(serverSource, /app\.get\(['"]\/_admin\/totp['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
-  assert.match(serverSource, /app\.post\(['"]\/_admin\/call['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
+  assert.match(serverSource, /adminApp\.get\(['"]\/_admin\/totp['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
+  assert.match(serverSource, /adminApp\.post\(['"]\/_admin\/call['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
 });

@@ -19,6 +19,7 @@ import { listImprovementSuggestions, submitImprovementSuggestion, updateImprovem
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT ?? 8787);
+const ADMIN_PORT = Number(process.env.ADMIN_PORT ?? 8788);
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 const LEGACY_MCP_TOKEN = process.env.MCP_TOKEN;
 const PUBLIC_URL = process.env.PUBLIC_URL ? process.env.PUBLIC_URL.replace(/\/$/, '') : undefined;
@@ -410,18 +411,57 @@ function isLocalAdminRequest(req: express.Request) {
   return loopback && !fromCaddy;
 }
 
-app.get('/', async (req, res) => {
+const adminApp = express();
+adminApp.disable('x-powered-by');
+adminApp.use(express.json({ limit: '2mb' }));
+adminApp.use(express.urlencoded({ extended: false, limit: '64kb' }));
+adminApp.use((req, res, next) => {
+  const id = requestId(req);
+  res.setHeader('X-Request-Id', id);
+  next();
+});
+
+adminApp.get('/healthz', (_req, res) => res.json({ ok: true, agents: registry.list() }));
+
+adminApp.get('/', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   res.type('html').send(readFileSync(resolve(__dirname, 'admin-ui/admin.html'), 'utf8'));
 });
-app.use('/assets', express.static(resolve(__dirname, 'admin-ui/assets'), { index: false, immutable: true, maxAge: '1y' }));
+adminApp.use('/assets', express.static(resolve(__dirname, 'admin-ui/assets'), { index: false, immutable: true, maxAge: '1y' }));
 
-app.get('/_admin/totp', async (req, res) => {
+adminApp.get('/_admin/totp', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  try { const db = await getDb(); let config = db.totp_config; if (!config) { const now = Date.now(); config = { secret: randomBase32(), created_at: now, updated_at: now }; db.totp_config = config; await saveDb(db); } const account = 'owner'; const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account); const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 }); res.json({ configured: true, account, qrDataUrl }); } catch (e) { res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) }); }
+  try {
+    const db = await getDb();
+    let config = db.totp_config;
+    if (!config) {
+      const now = Date.now();
+      config = { secret: randomBase32(), created_at: now, updated_at: now };
+      db.totp_config = config;
+      await saveDb(db);
+    }
+    const account = 'owner';
+    const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account);
+    const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 });
+    res.json({ configured: true, account, qrDataUrl });
+  } catch (e) {
+    res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) });
+  }
 });
 
-app.post('/_admin/call', async (req, res) => { if (!isLocalAdminRequest(req)) return res.status(404).send('Not found'); try { const { tool, args } = req.body ?? {}; if (!['list_directory','read_file','write_file','get_system_info'].includes(tool)) return res.status(400).json({ error: 'tool not allowed in admin UI' }); const result = await registry.call(String(args.agentId), tool as ToolName, args); res.json({ ok: true, result }); } catch (e) { res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) }); } });
+adminApp.post('/_admin/call', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  try {
+    const { tool, args } = req.body ?? {};
+    if (!['list_directory', 'read_file', 'write_file', 'get_system_info'].includes(tool)) {
+      return res.status(400).json({ error: 'tool not allowed in admin UI' });
+    }
+    const result = await registry.call(String(args.agentId), tool as ToolName, args);
+    res.json({ ok: true, result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) });
+  }
+});
 
 const toBuffer = (chunk: unknown) => {
   if (Buffer.isBuffer(chunk)) return chunk;
@@ -438,6 +478,11 @@ app.all('/mcp', async (req, res) => {
     const result = mcpHandler(req, res, req.body);
     if (result && typeof (result as Promise<unknown>).then === 'function') void (result as Promise<unknown>).then(() => mcpDebug('handler:complete', { method: req.method })).catch(error => mcpDebug('handler:error', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }));
   } catch (error) { mcpDebug('handler:throw', { method: req.method, error: String(error instanceof Error ? error.stack ?? error.message : error) }); throw error; }
+});
+
+const adminServer = createHttpServer(adminApp);
+adminServer.listen(ADMIN_PORT, '127.0.0.1', () => {
+  console.log(`Admin console listening on http://127.0.0.1:${ADMIN_PORT}`);
 });
 
 const httpServer = createHttpServer(app);

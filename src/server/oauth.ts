@@ -119,7 +119,7 @@ export async function authorizationPage(req: Request) {
   oauthDebug('authorize:start', { clientId: short(clientId), redirectUri, responseType, hasState: Boolean(state), hasCodeChallenge: Boolean(codeChallenge), codeChallengeMethod, resource, clientFound: Boolean(client), existingClient, implicitPublicClient: !existingClient && Boolean(client), redirectUriAllowed });
   const secret = await getTotpSecret();
   if (!client || responseType !== 'code' || !redirectUriAllowed || codeChallengeMethod?.toUpperCase() !== 'S256' || !codeChallenge) { oauthDebug('authorize:rejected', { clientId: short(clientId), responseType, redirectUri, reason: !client ? 'unknown_client' : responseType !== 'code' ? 'unsupported_response_type' : !redirectUriAllowed ? 'redirect_uri_mismatch' : codeChallengeMethod?.toUpperCase() !== 'S256' ? 'unsupported_pkce_method' : 'missing_code_challenge' }); return { status: 400, body: 'Invalid OAuth authorization request.' }; }
-  if (!secret) return { status: 503, body: 'MCP owner authentication is not configured. Open the local admin page at / and configure Authenticator first.' };
+  if (!secret) return { status: 503, body: `MCP owner authentication is not configured. Open the local admin console at http://127.0.0.1:${process.env.ADMIN_PORT ?? 8788} and configure Authenticator first.` };
   const action = `/oauth/authorize/approve?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge)}`;
   oauthDebug('authorize:page', { clientId: short(clientId), redirectUri });
   const displayUrl = getBaseUrl(req);
