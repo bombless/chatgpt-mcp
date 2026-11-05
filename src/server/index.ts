@@ -453,9 +453,6 @@ adminApp.get('/_admin/agents', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   res.json({ agents: await registry.listWithCapabilities() });
 });
-const adminAgentTools = [
-  'read_file','write_file','edit_file','list_directory','move_file','delete_file','execute_powershell','execute_bash','get_system_info','get_agent_capabilities','get_screen_info','take_screenshot','take_adb_screenshot','read_image_file','click_mouse','move_mouse','scroll_mouse','get_screen_pixel','npm_test','npm_run','npm_install','npm_init','gradle_assemble_debug','gradle_install_debug','run_python','python_job_inspect','python_job_kill','python_jobs','run_node','read_file_range','tail_file','get_file_info','create_directory','copy_file','process_list','kill_process','rg','git','find_files','get_proxy_info','cdp_version','cdp_list_targets','cdp_call'
-] as const;
 const adminToolAliases: Record<string, { tool: ToolName; args: (args: Record<string, unknown>) => Record<string, unknown> }> = {
   git_status: { tool: 'git', args: a => ({ ...a, args: ['status', ...(Array.isArray(a.args) ? a.args : [])] }) },
   git_diff: { tool: 'git', args: a => ({ ...a, args: ['diff', ...(Array.isArray(a.args) ? a.args : [])] }) },
@@ -466,50 +463,48 @@ const adminToolAliases: Record<string, { tool: ToolName; args: (args: Record<str
   git_add: { tool: 'git', args: a => ({ ...a, args: ['add', ...(Array.isArray(a.args) ? a.args : [])] }) },
   git_commit: { tool: 'git', args: a => ({ ...a, args: ['commit', ...(Array.isArray(a.args) ? a.args : [])] }) },
 };
+type AdminToolDefinition = { name: string; description: string; inputSchema: Record<string, unknown> };
+function getAdminToolDefinitions(): AdminToolDefinition[] {
+  const server = buildMcpServer();
+  const registered = (server as unknown as { _registeredTools?: Record<string, { description?: string; inputSchema?: z.ZodType }> })._registeredTools;
+  if (!registered) throw new Error('MCP SDK does not expose registered tool definitions');
+  const definitions: AdminToolDefinition[] = [];
+  for (const [name, tool] of Object.entries(registered)) {
+    if (!tool.inputSchema) continue;
+    const schema = z.toJSONSchema(tool.inputSchema) as Record<string, unknown>;
+    const properties = schema.properties as Record<string, unknown> | undefined;
+    if (!properties || !('agentId' in properties)) continue;
+    definitions.push({ name, description: tool.description ?? '', inputSchema: schema });
+  }
+  const git = definitions.find(tool => tool.name === 'git');
+  if (git) for (const name of Object.keys(adminToolAliases)) definitions.push({ ...git, name, description: `Git ${name.replace('git_', '')} operation` });
+  return definitions.sort((a, b) => a.name.localeCompare(b.name));
+}
 adminApp.get('/_admin/tools', (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  res.json({ tools: [...adminAgentTools, ...Object.keys(adminToolAliases)] });
+  try { res.json({ tools: getAdminToolDefinitions() }); }
+  catch (error) { res.status(500).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
-
-adminApp.get('/', async (req, res) => {
-  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  res.type('html').send(readFileSync(resolve(__dirname, 'admin-ui/admin.html'), 'utf8'));
-});
-adminApp.use('/assets', express.static(resolve(__dirname, 'admin-ui/assets'), { index: false, immutable: true, maxAge: '1y' }));
-
-adminApp.get('/_admin/totp', async (req, res) => {
-  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
-  try {
-    const db = await getDb();
-    let config = db.totp_config;
-    if (!config) {
-      const now = Date.now();
-      config = { secret: randomBase32(), created_at: now, updated_at: now };
-      db.totp_config = config;
-      await saveDb(db);
-    }
-    const account = 'owner';
-    const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account);
-    const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 });
-    res.json({ configured: true, account, qrDataUrl });
-  } catch (e) {
-    res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) });
-  }
-});
-
 adminApp.post('/_admin/call', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   try {
     const { tool, args } = req.body ?? {};
     if (typeof tool !== 'string' || !args || typeof args !== 'object' || Array.isArray(args)) return res.status(400).json({ error: 'tool and JSON object args are required' });
+    const definition = getAdminToolDefinitions().find(item => item.name === tool);
+    if (!definition) return res.status(400).json({ error: 'tool not available in admin runner' });
     const alias = adminToolAliases[tool];
-    const allowed = (adminAgentTools as readonly string[]).includes(tool);
-    if (!allowed && !alias) return res.status(400).json({ error: 'tool not available in admin runner' });
+    const registeredName = alias?.tool ?? tool as ToolName;
+    const registeredDefinition = getAdminToolDefinitions().find(item => item.name === (alias ? 'git' : tool));
+    if (!registeredDefinition) return res.status(400).json({ error: 'underlying MCP tool schema not found' });
+    const registered = (buildMcpServer() as unknown as { _registeredTools: Record<string, { inputSchema: z.ZodType }> })._registeredTools;
+    const schema = registered[alias ? 'git' : tool]?.inputSchema;
+    if (!schema) return res.status(400).json({ error: 'tool input schema unavailable' });
+    const parsed = schema.safeParse(args);
+    if (!parsed.success) return res.status(400).json({ error: 'Tool arguments failed schema validation', details: parsed.error.issues });
     const agentId = String(args.agentId ?? '');
     if (!agentId) return res.status(400).json({ error: 'agentId is required' });
-    const result = alias
-      ? await registry.call(agentId, alias.tool, alias.args(args))
-      : await registry.call(agentId, tool as ToolName, args);
+    const validatedArgs = parsed.data as Record<string, unknown>;
+    const result = await registry.call(agentId, registeredName, alias ? alias.args(validatedArgs) : validatedArgs);
     res.json({ ok: true, result });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e instanceof Error ? e.message : e) });
