@@ -43,6 +43,7 @@ export type ToolName =
   | 'execute_powershell'
   | 'execute_bash'
   | 'get_system_info'
+  | 'get_agent_capabilities'
   | 'get_screen_info'
   | 'take_screenshot'
   | 'take_adb_screenshot'
