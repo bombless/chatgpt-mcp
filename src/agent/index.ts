@@ -199,8 +199,8 @@ getConfig().then(config => {
             : Promise.resolve({ ok: false as const, error: 'Bash execution is only supported on Linux agents.' }),
         ]);
         const adbOutput = adb.ok ? String(adb.value.stdout ?? '') : '';
-        const adbDevices = adbOutput.split(/\\r?\\n/u).slice(1).map(line => line.trim()).filter(Boolean).map(line => {
-          const [serial, state] = line.split(/\\s+/u);
+        const adbDevices = adbOutput.split(/\r?\n/u).slice(1).map(line => line.trim()).filter(Boolean).map(line => {
+          const [serial, state] = line.split(/\s+/u);
           return { serial, state };
         });
         const authorizedDevices = adbDevices.filter(device => device.state === 'device');
