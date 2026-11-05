@@ -62,6 +62,26 @@ class AgentRegistry {
       };
     });
   }
+  async listWithCapabilities() {
+    const agents = this.list();
+    return await Promise.all(agents.map(async agent => {
+      try {
+        const capabilities = await this.call(agent.agentId, 'get_agent_capabilities', {});
+        return { ...agent, capabilities };
+      } catch (error) {
+        return {
+          ...agent,
+          capabilities: {
+            screenshot: { supported: false, detail: 'Unable to probe agent capabilities' },
+            cdp9222: { connected: false, detail: error instanceof Error ? error.message : String(error) },
+            powershell: { available: false, enabled: false, detail: 'Unknown' },
+            bash: { available: false, enabled: false, detail: 'Unknown' },
+            adb: { available: false, connected: false, devices: [], detail: 'Unknown' },
+          },
+        };
+      }
+    }));
+  }
   notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }) {
     const socket = this.get(agentId);
     if (!socket) { mcpDebug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }
@@ -112,7 +132,7 @@ function buildMcpServer() {
       resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
 
   server.registerTool('list_agents', {
-    description: 'List connected agents with their operating system, login username, hostname, and workspace directory.',
+    description: 'List connected agents and actively probe screenshot support, local CDP connectivity on 127.0.0.1:9222, PowerShell/Bash availability and execution permission, and authorized ADB devices.',
     inputSchema: z.object({ intent: intentSchema }),
     outputSchema: z.object({ result: z.array(z.object({
       agentId: z.string(),
@@ -122,8 +142,15 @@ function buildMcpServer() {
       username: z.string(),
       workspace: z.string(),
       version: z.string(),
+      capabilities: z.object({
+        screenshot: z.object({ supported: z.boolean(), detail: z.string() }),
+        cdp9222: z.object({ connected: z.boolean(), detail: z.string() }),
+        powershell: z.object({ available: z.boolean(), enabled: z.boolean(), detail: z.string() }),
+        bash: z.object({ available: z.boolean(), enabled: z.boolean(), detail: z.string() }),
+        adb: z.object({ available: z.boolean(), connected: z.boolean(), devices: z.array(z.string()), detail: z.string() }),
+      }),
     })) }),
-  }, async () => resultContent(registry.list()));
+  }, async () => resultContent(await registry.listWithCapabilities()));
   server.registerTool('submit_improvement_suggestion', { description: 'Persist a concrete suggestion for improving this MCP service. Use when actual usage reveals recurring friction, missing capabilities, unclear tool behavior, reliability/performance/usability/security issues, or a valuable enhancement. Include observed context and expected benefit; do not submit generic or speculative suggestions. This records feedback only and does not modify the server.', inputSchema: input({ title: z.string().trim().min(5).max(160), description: z.string().trim().min(10).max(4000), category: z.enum(suggestionCategories), priority: z.enum(suggestionPriorities).default('medium'), source: z.string().trim().max(500).optional() }), outputSchema: z.object({ result: z.object({ suggestion: z.object({ id: z.string(), title: z.string(), status: z.string(), occurrences: z.number().int() }), deduplicated: z.boolean() }) }) }, async ({ title, description, category, priority, source }) => { const result = await submitImprovementSuggestion({ title, description, category, priority, source }); return resultContent({ suggestion: { id: result.suggestion.id, title: result.suggestion.title, status: result.suggestion.status, occurrences: result.suggestion.occurrences }, deduplicated: result.deduplicated }); });
   server.registerTool('list_improvement_suggestions', { description: 'List persisted MCP improvement suggestions. Filter by status/category to review the backlog and identify recurring priorities.', inputSchema: input({ status: z.enum(suggestionStatuses).optional(), category: z.enum(suggestionCategories).optional(), limit: z.number().int().min(1).max(200).default(50) }), outputSchema: z.object({ result: z.array(z.object({ id: z.string(), title: z.string(), description: z.string(), category: z.string(), priority: z.string(), status: z.string(), created_at: z.number(), updated_at: z.number(), occurrences: z.number().int() })) }) }, async ({ status, category, limit }) => resultContent(await listImprovementSuggestions({ status, category, limit })));
   server.registerTool('update_improvement_suggestion', { description: 'Update the workflow status of a persisted MCP improvement suggestion. Use only when the user requests backlog maintenance or a status change; this does not implement the suggestion itself.', inputSchema: input({ id: z.string().uuid(), status: z.enum(suggestionStatuses), note: z.string().trim().max(1000).optional() }), outputSchema: z.object({ result: z.object({ id: z.string(), title: z.string(), status: z.string(), updated_at: z.number() }) }) }, async ({ id, status, note }) => { const result = await updateImprovementSuggestion({ id, status, note }); return resultContent({ id: result.id, title: result.title, status: result.status, updated_at: result.updated_at }); });
