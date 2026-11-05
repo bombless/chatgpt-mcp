@@ -484,8 +484,6 @@ function getAdminToolDefinitions(): AdminToolDefinition[] {
     if (!properties || !('agentId' in properties)) continue;
     definitions.push({ name, description: tool.description ?? '', inputSchema: schema });
   }
-  const git = definitions.find(tool => tool.name === 'git');
-  if (git) for (const name of Object.keys(adminToolAliases)) definitions.push({ ...git, name, description: `Git ${name.replace('git_', '')} operation` });
   return definitions.sort((a, b) => a.name.localeCompare(b.name));
 }
 adminApp.get('/_admin/tools', (req, res) => {
@@ -502,9 +500,7 @@ adminApp.post('/_admin/call', async (req, res) => {
     if (!definition) return res.status(400).json({ error: 'tool not available in admin runner' });
     const alias = adminToolAliases[tool];
     const registeredName = alias?.tool ?? tool as ToolName;
-    const registeredDefinition = getAdminToolDefinitions().find(item => item.name === (alias ? 'git' : tool));
-    if (!registeredDefinition) return res.status(400).json({ error: 'underlying MCP tool schema not found' });
-    const schema = getAdminToolRegistry()[alias ? 'git' : tool]?.inputSchema;
+    const schema = getAdminToolRegistry()[tool]?.inputSchema;
     if (!schema) return res.status(400).json({ error: 'tool input schema unavailable' });
     const parsed = schema.safeParse(args);
     if (!parsed.success) return res.status(400).json({ error: 'Tool arguments failed schema validation', details: parsed.error.issues });
