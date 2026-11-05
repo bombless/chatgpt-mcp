@@ -182,6 +182,36 @@ getConfig().then(config => {
           }
         }
       }
+      case 'get_agent_capabilities': {
+        const probe = async <T>(fn: () => Promise<T>) => {
+          try { return { ok: true as const, value: await fn() }; }
+          catch (error) { return { ok: false as const, error: error instanceof Error ? error.message : String(error) }; }
+        };
+        const [screen, cdp, adb, powershell, bash] = await Promise.all([
+          probe(() => runCodingTool('get_screen_info', {}, AGENT_WORKSPACE) as Promise<{ screens?: unknown[] }>),
+          probe(() => runCodingTool('cdp_version', {}, AGENT_WORKSPACE)),
+          probe(() => execFileAsync('adb', ['devices'], { encoding: 'utf8', timeout: 5000, maxBuffer: 100_000 })),
+          IS_WINDOWS
+            ? probe(() => execFileAsync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { windowsHide: true, timeout: 5000, maxBuffer: 20_000 }))
+            : Promise.resolve({ ok: false as const, error: 'PowerShell is only supported on Windows agents.' }),
+          IS_LINUX
+            ? probe(() => execFileAsync('/bin/bash', ['--version'], { timeout: 5000, maxBuffer: 20_000 }))
+            : Promise.resolve({ ok: false as const, error: 'Bash execution is only supported on Linux agents.' }),
+        ]);
+        const adbOutput = adb.ok ? String(adb.value.stdout ?? '') : '';
+        const adbDevices = adbOutput.split(/\\r?\\n/u).slice(1).map(line => line.trim()).filter(Boolean).map(line => {
+          const [serial, state] = line.split(/\\s+/u);
+          return { serial, state };
+        });
+        const authorizedDevices = adbDevices.filter(device => device.state === 'device');
+        return {
+          screenshot: { supported: screen.ok && Array.isArray(screen.value.screens) && screen.value.screens.length > 0, detail: screen.ok ? (screen.value.screens?.length ? `${screen.value.screens.length} display(s) detected` : 'No displays detected') : screen.error },
+          cdp9222: { connected: cdp.ok, detail: cdp.ok ? 'Connected to 127.0.0.1:9222' : cdp.error },
+          powershell: { available: powershell.ok, enabled: powershell.ok && ALLOW_COMMAND_EXECUTION, detail: powershell.ok ? (ALLOW_COMMAND_EXECUTION ? 'Ready' : 'Available; command execution disabled') : powershell.error },
+          bash: { available: bash.ok, enabled: bash.ok && ALLOW_COMMAND_EXECUTION, detail: bash.ok ? (ALLOW_COMMAND_EXECUTION ? 'Ready' : 'Available; command execution disabled') : bash.error },
+          adb: { available: adb.ok, connected: authorizedDevices.length > 0, devices: authorizedDevices.map(device => device.serial), detail: !adb.ok ? adb.error : authorizedDevices.length ? `${authorizedDevices.length} authorized device(s)` : 'ADB is available; no authorized device connected' },
+        };
+      }
       case 'get_system_info':
         return {
           hostname: os.hostname(),
