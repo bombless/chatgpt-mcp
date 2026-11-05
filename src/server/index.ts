@@ -464,10 +464,18 @@ const adminToolAliases: Record<string, { tool: ToolName; args: (args: Record<str
   git_commit: { tool: 'git', args: a => ({ ...a, args: ['commit', ...(Array.isArray(a.args) ? a.args : [])] }) },
 };
 type AdminToolDefinition = { name: string; description: string; inputSchema: Record<string, unknown> };
+type RegisteredAdminTool = { description?: string; inputSchema?: z.ZodType };
+let cachedAdminToolRegistry: Record<string, RegisteredAdminTool> | undefined;
+function getAdminToolRegistry() {
+  if (!cachedAdminToolRegistry) {
+    const server = buildMcpServer();
+    cachedAdminToolRegistry = (server as unknown as { _registeredTools?: Record<string, RegisteredAdminTool> })._registeredTools;
+  }
+  if (!cachedAdminToolRegistry) throw new Error('MCP SDK does not expose registered tool definitions');
+  return cachedAdminToolRegistry;
+}
 function getAdminToolDefinitions(): AdminToolDefinition[] {
-  const server = buildMcpServer();
-  const registered = (server as unknown as { _registeredTools?: Record<string, { description?: string; inputSchema?: z.ZodType }> })._registeredTools;
-  if (!registered) throw new Error('MCP SDK does not expose registered tool definitions');
+  const registered = getAdminToolRegistry();
   const definitions: AdminToolDefinition[] = [];
   for (const [name, tool] of Object.entries(registered)) {
     if (!tool.inputSchema) continue;
@@ -496,8 +504,7 @@ adminApp.post('/_admin/call', async (req, res) => {
     const registeredName = alias?.tool ?? tool as ToolName;
     const registeredDefinition = getAdminToolDefinitions().find(item => item.name === (alias ? 'git' : tool));
     if (!registeredDefinition) return res.status(400).json({ error: 'underlying MCP tool schema not found' });
-    const registered = (buildMcpServer() as unknown as { _registeredTools: Record<string, { inputSchema: z.ZodType }> })._registeredTools;
-    const schema = registered[alias ? 'git' : tool]?.inputSchema;
+    const schema = getAdminToolRegistry()[alias ? 'git' : tool]?.inputSchema;
     if (!schema) return res.status(400).json({ error: 'tool input schema unavailable' });
     const parsed = schema.safeParse(args);
     if (!parsed.success) return res.status(400).json({ error: 'Tool arguments failed schema validation', details: parsed.error.issues });
