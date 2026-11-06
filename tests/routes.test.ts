@@ -4,7 +4,10 @@ import { resolve } from 'node:path';
 import test from 'node:test';
 
 const projectRoot = resolve(import.meta.dirname, '..');
-const serverSource = readFileSync(resolve(projectRoot, 'src/server/index.ts'), 'utf8');
+const serverSource = [
+  'src/server/index.ts',
+  'src/server/express-app.ts',
+].map(file => readFileSync(resolve(projectRoot, file), 'utf8')).join('\n');
 const adminHtml = readFileSync(resolve(projectRoot, 'src/server/admin.html'), 'utf8');
 const adminApp = readFileSync(resolve(projectRoot, 'src/server/admin/App.vue'), 'utf8');
 
