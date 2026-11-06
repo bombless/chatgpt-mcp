@@ -484,6 +484,11 @@ function getAdminToolDefinitions(): AdminToolDefinition[] {
     if (!properties || !('agentId' in properties)) continue;
     definitions.push({ name, description: tool.description ?? '', inputSchema: schema });
   }
+  // Git subcommands are named admin actions sharing the registered git schema.
+  const git = definitions.find(tool => tool.name === 'git');
+  if (git) for (const name of Object.keys(adminToolAliases)) {
+    definitions.push({ ...git, name, description: `Git ${name.replace('git_', '')} operation` });
+  }
   return definitions.sort((a, b) => a.name.localeCompare(b.name));
 }
 adminApp.get('/_admin/tools', (req, res) => {
@@ -491,6 +496,36 @@ adminApp.get('/_admin/tools', (req, res) => {
   try { res.json({ tools: getAdminToolDefinitions() }); }
   catch (error) { res.status(500).json({ error: error instanceof Error ? error.message : String(error) }); }
 });
+// Keep the admin console and its assets on the loopback-only 8788 listener.
+adminApp.get('/', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  res.type('html').send(readFileSync(resolve(__dirname, 'admin-ui/admin.html'), 'utf8'));
+});
+adminApp.use('/assets', (req, res, next) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  next();
+}, express.static(resolve(__dirname, 'admin-ui/assets'), { index: false, immutable: true, maxAge: '1y' }));
+
+adminApp.get('/_admin/totp', async (req, res) => {
+  if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
+  try {
+    const db = await getDb();
+    let config = db.totp_config;
+    if (!config) {
+      const now = Date.now();
+      config = { secret: randomBase32(), created_at: now, updated_at: now };
+      db.totp_config = config;
+      await saveDb(db);
+    }
+    const account = 'owner';
+    const uri = otpauthUri(config.secret, 'ChatGPT-MCP', account);
+    const qrDataUrl = await QRCode.toDataURL(uri, { margin: 2, width: 280 });
+    res.json({ configured: true, account, qrDataUrl });
+  } catch (e) {
+    res.status(500).json({ configured: false, error: String(e instanceof Error ? e.message : e) });
+  }
+});
+
 adminApp.post('/_admin/call', async (req, res) => {
   if (!isLocalAdminRequest(req)) return res.status(404).send('Not found');
   try {
@@ -500,7 +535,7 @@ adminApp.post('/_admin/call', async (req, res) => {
     if (!definition) return res.status(400).json({ error: 'tool not available in admin runner' });
     const alias = adminToolAliases[tool];
     const registeredName = alias?.tool ?? tool as ToolName;
-    const schema = getAdminToolRegistry()[tool]?.inputSchema;
+    const schema = getAdminToolRegistry()[alias ? 'git' : tool]?.inputSchema;
     if (!schema) return res.status(400).json({ error: 'tool input schema unavailable' });
     const parsed = schema.safeParse(args);
     if (!parsed.success) return res.status(400).json({ error: 'Tool arguments failed schema validation', details: parsed.error.issues });
