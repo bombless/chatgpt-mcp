@@ -9,7 +9,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
-import type { AgentMessage, AgentRequest, AgentResponse, ToolName } from '../shared/protocol.js';
+import type { AgentMessage, ToolName } from '../shared/protocol.js';
+import { AgentRegistry } from './agent-registry.js';
 import { approve, authorizationPage, exchangeToken, getBaseUrl, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
@@ -31,55 +32,7 @@ function mcpDebug(event: string, details: Record<string, unknown> = {}) { if (MC
 function requestId(req: express.Request) { return req.get('x-request-id') ?? crypto.randomUUID(); }
 function safeAuthInfo(req: express.Request) { const authorization = req.header('authorization'); return { hasAuthorization: Boolean(authorization), scheme: authorization?.split(/\s+/, 1)[0], tokenLength: authorization?.startsWith('Bearer ') ? authorization.slice(7).length : undefined }; }
 
-class AgentRegistry {
-  private readonly agents = new Map<string, WebSocket>();
-  private readonly metadata = new Map<string, { hostname: string; platform: string; username: string; workspace: string; version: string }>();
-  private readonly pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  add(agentId: string, socket: WebSocket, metadata: { hostname: string; platform: string; username: string; workspace: string; version: string }) {
-    const old = this.agents.get(agentId);
-    old?.close(4000, 'replaced by a newer connection');
-    this.agents.set(agentId, socket);
-    this.metadata.set(agentId, metadata);
-    socket.on('close', () => {
-      if (this.agents.get(agentId) === socket) {
-        this.agents.delete(agentId);
-        this.metadata.delete(agentId);
-      }
-    });
-  }
-  get(agentId: string) { const socket = this.agents.get(agentId); return socket?.readyState === WebSocket.OPEN ? socket : undefined; }
-  list() {
-    return [...this.agents.keys()].map(agentId => {
-      const metadata = this.metadata.get(agentId);
-      return {
-        agentId,
-        hostname: metadata?.hostname ?? agentId,
-        os: metadata?.platform === 'win32' ? 'windows' : metadata?.platform === 'linux' ? 'linux' : metadata?.platform ?? 'unknown',
-        platform: metadata?.platform ?? 'unknown',
-        username: metadata?.username ?? 'unknown',
-        workspace: metadata?.workspace ?? 'unknown',
-        version: metadata?.version ?? 'unknown',
-      };
-    });
-  }
-  notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }) {
-    const socket = this.get(agentId);
-    if (!socket) { mcpDebug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }
-    try { socket.send(JSON.stringify(message)); return true; } catch (error) { mcpDebug('agent-diagnostic:send-error', { agentId, tool: message.tool, error: String(error) }); return false; }
-  }
-  async call(agentId: string, tool: ToolName, args: Record<string, unknown>) {
-    const socket = this.get(agentId);
-    if (!socket) { mcpDebug('agent-call:missing', { agentId, tool }); throw new Error(`Windows agent '${agentId}' is not connected`); }
-    const id = crypto.randomUUID(); const request: AgentRequest = { type: 'request', id, tool, args }; mcpDebug('agent-call:start', { requestId: id, agentId, tool });
-    return await new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); mcpDebug('agent-call:timeout', { requestId: id, agentId, tool, timeoutMs: REQUEST_TIMEOUT_MS }); reject(new Error(`Agent request timed out after ${REQUEST_TIMEOUT_MS}ms`)); }, REQUEST_TIMEOUT_MS);
-      this.pending.set(id, { resolve: value => { clearTimeout(timer); mcpDebug('agent-call:success', { requestId: id, agentId, tool }); resolve(value); }, reject: error => { clearTimeout(timer); mcpDebug('agent-call:error', { requestId: id, agentId, tool, error: error.message }); reject(error); } });
-      try { socket.send(JSON.stringify(request)); } catch (error) { this.pending.delete(id); clearTimeout(timer); mcpDebug('agent-call:send-error', { requestId: id, agentId, tool, error: String(error) }); reject(error instanceof Error ? error : new Error(String(error))); }
-    });
-  }
-  handleMessage(message: AgentMessage) { if (message.type !== 'response') return; const response = message as AgentResponse; const item = this.pending.get(response.id); if (!item) { mcpDebug('agent-response:orphan', { requestId: response.id }); return; } this.pending.delete(response.id); if (response.ok) item.resolve(response.result); else item.reject(new Error(response.error ?? 'Agent request failed')); }
-}
-const registry = new AgentRegistry();
+const registry = new AgentRegistry(REQUEST_TIMEOUT_MS, mcpDebug);
 function resultContent(value: unknown) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
@@ -516,10 +469,11 @@ wss.on('connection', ws => {
       const message = JSON.parse(raw.toString()) as AgentMessage;
       if (message.type === 'hello') {
         if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId');
-        agentId = message.agentId;
+        const connectedAgentId = message.agentId;
+        agentId = connectedAgentId;
         initialized = true;
-        registry.add(agentId, ws, {
-          hostname: typeof message.hostname === 'string' ? message.hostname : agentId,
+        registry.add(connectedAgentId, ws, {
+          hostname: typeof message.hostname === 'string' ? message.hostname : connectedAgentId,
           platform: typeof message.platform === 'string' ? message.platform : 'unknown',
           username: typeof message.username === 'string' ? message.username : 'unknown',
           workspace: typeof message.workspace === 'string' ? message.workspace : 'unknown',
