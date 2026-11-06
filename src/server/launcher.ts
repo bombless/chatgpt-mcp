@@ -110,7 +110,7 @@ if (!localMode && !embeddedAgentMode) {
           else if (value !== undefined) lines.push(`${name}: ${value}`);
         }
         lines.push('', '');
-        socket.write(lines.join('\\r\\n'));
+        socket.write(lines.join('\r\n'));
         if (upstreamHead.length) upstreamSocket.write(upstreamHead);
         if (head.length) upstreamSocket.write(head);
         socket.pipe(upstreamSocket);
