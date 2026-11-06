@@ -12,7 +12,7 @@ const mcpRoutes = [
   ['GET', '/healthz'], ['GET', '/.well-known/oauth-authorization-server'],
   ['GET', '/.well-known/oauth-protected-resource'], ['POST', '/oauth/register'],
   ['GET', '/oauth/authorize'], ['POST', '/oauth/authorize/approve'], ['POST', '/oauth/token'],
-  ['GET', '/agents'], ['ALL', '/mcp'],
+  ['GET', '/agents'], ['POST', '/agent-upload/:token'], ['ALL', '/mcp'],
 ] as const;
 
 const adminRoutes = [
@@ -74,4 +74,12 @@ test('admin runner registers and validates Git subcommand aliases', () => {
 test('npm test includes the route regression suite', () => {
   const packageJson = JSON.parse(readFileSync(resolve(projectRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
   assert.match(packageJson.scripts?.test ?? '', /tests\/routes\.test\.ts/);
+});
+
+test('temporary file upload tool and endpoint are registered with bounded one-time tokens', () => {
+  assert.match(serverSource, /create_temporary_file_upload_url/);
+  assert.match(serverSource, /TEMPORARY_UPLOAD_TTL_MS = 10 \* 60 \* 1000/);
+  assert.match(serverSource, /TEMPORARY_UPLOAD_MAX_BYTES = 25 \* 1024 \* 1024/);
+  assert.match(serverSource, /temporaryUploads\.delete\(token\)/);
+  assert.match(serverSource, /registry\.call\(upload\.agentId, 'write_file'/);
 });
