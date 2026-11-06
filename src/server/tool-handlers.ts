@@ -5,9 +5,6 @@ import {
   listImprovementSuggestions,
   submitImprovementSuggestion,
   updateImprovementSuggestion,
-  type SuggestionCategory,
-  type SuggestionPriority,
-  type SuggestionStatus,
 } from './improvement-suggestions.js';
 
 export interface AgentCaller {
@@ -16,178 +13,57 @@ export interface AgentCaller {
   notifyAgent(agentId: string, message: { type: 'server_diagnostic'; level: 'error' | 'warning'; tool: string; message: string; requestId?: string }): boolean;
 }
 
-export type ResultContentFn = (value: unknown) => {
-  content: Array<{ type: 'text'; text: string }>;
-  structuredContent: { result: unknown };
-};
-
-export type McpDebugFn = (event: string, details?: Record<string, unknown>) => void;
-
 export interface ToolHandlerDependencies {
   registry: AgentCaller;
-  resultContent: ResultContentFn;
-  mcpDebug?: McpDebugFn;
+  resultContent: (value: unknown) => { content: Array<{ type: 'text'; text: string }>; structuredContent: { result: unknown } };
+  mcpDebug?: (event: string, details?: Record<string, unknown>) => void;
 }
 
 export function createToolHandlers({ registry, resultContent, mcpDebug = () => {} }: ToolHandlerDependencies) {
   return {
-    codingTool: (name: ToolName) =>
-      async (args: Record<string, unknown>) =>
-        resultContent(await registry.call(String(args.agentId), name, args)),
+    codingTool: (name: ToolName) => async (args: Record<string, unknown>) =>
+      resultContent(await registry.call(String(args.agentId), name, args)),
 
-    npmTool: (
-      name: Extract<ToolName, 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init'>,
-      argsBuilder: (args: Record<string, unknown>) => string[],
-    ) =>
-      async ({ agentId, args, cwd, intent }: { agentId: string; args: string[]; cwd?: string; intent?: string }) =>
+    npmTool: (name: Extract<ToolName, 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init'>, argsBuilder: (args: Record<string, unknown>) => string[]) =>
+      async ({ agentId, args, cwd, intent }: any) =>
         resultContent(await registry.call(agentId, name, { args: argsBuilder({ args }), cwd, intent })),
 
-    gitTool: (subcommand: string) =>
-      async ({ agentId, args, cwd, intent }: { agentId: string; args?: unknown; cwd?: string; intent?: string }) =>
-        resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })),
+    gitTool: (subcommand: string) => async ({ agentId, args, cwd, intent }: any) =>
+      resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })),
 
-    gradleTool: (name: Extract<ToolName, 'gradle_assemble_debug' | 'gradle_install_debug'>) =>
-      async ({ agentId, cwd, intent }: { agentId: string; cwd?: string; intent?: string }) =>
-        resultContent(await registry.call(agentId, name, { cwd, intent })),
+    gradleTool: (name: Extract<ToolName, 'gradle_assemble_debug' | 'gradle_install_debug'>) => async ({ agentId, cwd, intent }: any) =>
+      resultContent(await registry.call(agentId, name, { cwd, intent })),
 
-    listAgents: async () =>
-      resultContent(await registry.listWithCapabilities()),
+    listAgents: async () => resultContent(await registry.listWithCapabilities()),
 
-    submitImprovementSuggestion: async ({
-      title,
-      description,
-      category,
-      priority,
-      source,
-    }: {
-      title: string;
-      description: string;
-      category: SuggestionCategory;
-      priority: SuggestionPriority;
-      source?: string;
-    }) => {
+    submitImprovementSuggestion: async ({ title, description, category, priority, source }: any) => {
       const result = await submitImprovementSuggestion({ title, description, category, priority, source });
       return resultContent({
-        suggestion: {
-          id: result.suggestion.id,
-          title: result.suggestion.title,
-          status: result.suggestion.status,
-          occurrences: result.suggestion.occurrences,
-        },
+        suggestion: { id: result.suggestion.id, title: result.suggestion.title, status: result.suggestion.status, occurrences: result.suggestion.occurrences },
         deduplicated: result.deduplicated,
       });
     },
 
-    listImprovementSuggestions: async ({
-      status,
-      category,
-      limit,
-    }: {
-      status?: SuggestionStatus;
-      category?: SuggestionCategory;
-      limit?: number;
-    }) =>
-      resultContent(await listImprovementSuggestions({ status, category, limit })),
+    listImprovementSuggestions: async (filter: any) => resultContent(await listImprovementSuggestions(filter)),
 
-    updateImprovementSuggestion: async ({
-      id,
-      status,
-      note,
-    }: {
-      id: string;
-      status: SuggestionStatus;
-      note?: string;
-    }) => {
+    updateImprovementSuggestion: async ({ id, status, note }: any) => {
       const result = await updateImprovementSuggestion({ id, status, note });
-      return resultContent({
-        id: result.id,
-        title: result.title,
-        status: result.status,
-        updated_at: result.updated_at,
-      });
+      return resultContent({ id: result.id, title: result.title, status: result.status, updated_at: result.updated_at });
     },
 
-    readFile: async ({ agentId, path, intent }: { agentId: string; path: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'read_file', { path, intent })),
+    readFile: async ({ agentId, path, intent }: any) => resultContent(await registry.call(agentId, 'read_file', { path, intent })),
+    writeFile: async ({ agentId, path, content, expectedSha256, intent }: any) => resultContent(await registry.call(agentId, 'write_file', { path, content, expectedSha256, intent })),
+    editFile: async ({ agentId, path, oldText, newText, expectedReplacements, expectedSha256, intent }: any) => resultContent(await registry.call(agentId, 'edit_file', { path, oldText, newText, expectedReplacements, expectedSha256, intent })),
+    listDirectory: async ({ agentId, path, intent }: any) => resultContent(await registry.call(agentId, 'list_directory', { path, intent })),
+    moveFile: async ({ agentId, source, destination, expectedSha256, intent }: any) => resultContent(await registry.call(agentId, 'move_file', { source, destination, expectedSha256, intent })),
+    deleteFile: async ({ agentId, path, expectedSha256, intent }: any) => resultContent(await registry.call(agentId, 'delete_file', { path, expectedSha256, intent })),
+    executePowershell: async ({ agentId, command, intent }: any) => resultContent(await registry.call(agentId, 'execute_powershell', { command, intent })),
+    executeBash: async ({ agentId, command, intent }: any) => resultContent(await registry.call(agentId, 'execute_bash', { command, intent })),
+    getProxyInfo: async ({ agentId, intent }: any) => resultContent(await registry.call(agentId, 'get_proxy_info', { intent })),
+    getSystemInfo: async ({ agentId, intent }: any) => resultContent(await registry.call(agentId, 'get_system_info', { intent })),
+    getScreenInfo: async ({ agentId, intent }: any) => resultContent(await registry.call(agentId, 'get_screen_info', { intent })),
 
-    writeFile: async ({
-      agentId,
-      path,
-      content,
-      expectedSha256,
-      intent,
-    }: {
-      agentId: string;
-      path: string;
-      content: string;
-      expectedSha256?: string;
-      intent?: string;
-    }) =>
-      resultContent(await registry.call(agentId, 'write_file', { path, content, expectedSha256, intent })),
-
-    editFile: async ({
-      agentId,
-      path,
-      oldText,
-      newText,
-      expectedReplacements,
-      expectedSha256,
-      intent,
-    }: {
-      agentId: string;
-      path: string;
-      oldText: string;
-      newText: string;
-      expectedReplacements: number;
-      expectedSha256: string;
-      intent?: string;
-    }) =>
-      resultContent(await registry.call(agentId, 'edit_file', { path, oldText, newText, expectedReplacements, expectedSha256, intent })),
-
-    listDirectory: async ({ agentId, path, intent }: { agentId: string; path: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'list_directory', { path, intent })),
-
-    moveFile: async ({
-      agentId,
-      source,
-      destination,
-      expectedSha256,
-      intent,
-    }: {
-      agentId: string;
-      source: string;
-      destination: string;
-      expectedSha256: string;
-      intent?: string;
-    }) =>
-      resultContent(await registry.call(agentId, 'move_file', { source, destination, expectedSha256, intent })),
-
-    deleteFile: async ({
-      agentId,
-      path,
-      expectedSha256,
-      intent,
-    }: {
-      agentId: string;
-      path: string;
-      expectedSha256: string;
-      intent?: string;
-    }) =>
-      resultContent(await registry.call(agentId, 'delete_file', { path, expectedSha256, intent })),
-
-    executePowershell: async ({ agentId, command, intent }: { agentId: string; command: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'execute_powershell', { command, intent })),
-
-    executeBash: async ({ agentId, command, intent }: { agentId: string; command: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'execute_bash', { command, intent })),
-
-    getProxyInfo: async ({ agentId, intent }: { agentId: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'get_proxy_info', { intent })),
-
-    getSystemInfo: async ({ agentId, intent }: { agentId: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'get_system_info', { intent })),
-
-    readImageFile: async ({ agentId, path: imagePath, intent }: { agentId: string; path: string; intent?: string }) => {
+    readImageFile: async ({ agentId, path: imagePath, intent }: any) => {
       try {
         const image = await registry.call(agentId, 'read_image_file', { path: imagePath, intent }) as {
           path: string; mimeType: string; data: string; dataBytes: number; dataSha256: string;
@@ -213,10 +89,7 @@ export function createToolHandlers({ registry, resultContent, mcpDebug = () => {
       }
     },
 
-    getScreenInfo: async ({ agentId, intent }: { agentId: string; intent?: string }) =>
-      resultContent(await registry.call(agentId, 'get_screen_info', { intent })),
-
-    takeAdbScreenshot: async ({ agentId, serial, intent }: { agentId: string; serial?: string; intent?: string }) => {
+    takeAdbScreenshot: async ({ agentId, serial, intent }: any) => {
       try {
         const image = await registry.call(agentId, 'take_adb_screenshot', { serial, intent }) as {
           serial: string; mimeType: string; width: number; height: number; data: string; dataBytes: number; dataSha256: string;
@@ -245,25 +118,7 @@ export function createToolHandlers({ registry, resultContent, mcpDebug = () => {
       }
     },
 
-    takeScreenshot: async ({
-      agentId,
-      screenIndex,
-      x,
-      y,
-      width,
-      height,
-      highlightCursor,
-      intent,
-    }: {
-      agentId: string;
-      screenIndex?: number;
-      x?: number;
-      y?: number;
-      width?: number;
-      height?: number;
-      highlightCursor?: boolean;
-      intent?: string;
-    }) => {
+    takeScreenshot: async ({ agentId, screenIndex, x, y, width, height, highlightCursor, intent }: any) => {
       try {
         const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, highlightCursor, intent }) as {
           cursor?: { x: number; y: number; screenIndex: number | null; relativeX: number | null; relativeY: number | null } | null;
@@ -293,8 +148,6 @@ export function createToolHandlers({ registry, resultContent, mcpDebug = () => {
           },
           ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
         ];
-        // Do not return structuredContent for screenshots: clients may prioritize it
-        // over content and consequently discard the actual MCP image blocks.
         return { content };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -304,19 +157,7 @@ export function createToolHandlers({ registry, resultContent, mcpDebug = () => {
       }
     },
 
-    applyPatch: async ({
-      agentId,
-      patch,
-      cwd,
-      expectedSha256ByPath,
-      intent,
-    }: {
-      agentId: string;
-      patch: string;
-      cwd?: string;
-      expectedSha256ByPath: Record<string, string>;
-      intent?: string;
-    }) => {
+    applyPatch: async ({ agentId, patch, cwd, expectedSha256ByPath, intent }: any) => {
       const patchPath = (value: string) => cwd ? `${cwd.replace(/[\\/]+$/, '')}\\${value.replaceAll('/', '\\')}` : value;
       return resultContent(await applyNativePatch(patch, {
         editFile: async (path, oldText, newText, expectedSha256) => registry.call(agentId, 'edit_file', { path: patchPath(path), oldText, newText, expectedReplacements: 1, expectedSha256, intent }),

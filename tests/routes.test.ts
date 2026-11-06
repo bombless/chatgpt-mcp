@@ -5,6 +5,8 @@ import test from 'node:test';
 
 const projectRoot = resolve(import.meta.dirname, '..');
 const serverSource = readFileSync(resolve(projectRoot, 'src/server/index.ts'), 'utf8');
+const mcpAppSource = readFileSync(resolve(projectRoot, 'src/server/mcp-app.ts'), 'utf8');
+const adminAppSource = readFileSync(resolve(projectRoot, 'src/server/admin-app.ts'), 'utf8');
 const adminHtml = readFileSync(resolve(projectRoot, 'src/server/admin.html'), 'utf8');
 const adminApp = readFileSync(resolve(projectRoot, 'src/server/admin/App.vue'), 'utf8');
 
@@ -23,7 +25,7 @@ for (const [method, path] of mcpRoutes) {
   test(`MCP route exists: ${method} ${path}`, () => {
     const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const declaration = new RegExp(`app\\.${method.toLowerCase()}\\(['"]${escapedPath}['"]`);
-    assert.match(serverSource, declaration, `Missing app.${method} ${path} route in src/server/index.ts`);
+    assert.match(mcpAppSource, declaration, `Missing app.${method} ${path} route in src/server/mcp-app.ts`);
   });
 }
 
@@ -31,14 +33,14 @@ for (const [method, path] of adminRoutes) {
   test(`Admin route exists: ${method} ${path}`, () => {
     const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const declaration = new RegExp(`adminApp\\.${method.toLowerCase()}\\(['"]${escapedPath}['"]`);
-    assert.match(serverSource, declaration, `Missing adminApp.${method} ${path} route in src/server/index.ts`);
+    assert.match(adminAppSource, declaration, `Missing adminApp.${method} ${path} route in src/server/admin-app.ts`);
   });
 }
 
 test('root route serves the Vite-built Vue admin entry on adminApp', () => {
-  assert.match(serverSource, /adminApp\.get\(['"]\/['"],\s*async\s*\(req,\s*res\)/);
-  assert.match(serverSource, /readFileSync\(resolve\(__dirname,\s*['"]admin-ui\/admin\.html['"]\),\s*['"]utf8['"]\)\)/);
-  assert.match(serverSource, /express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\),\s*\{/);
+  assert.match(adminAppSource, /adminApp\.get\(['"]\/['"],\s*async\s*\(req,\s*res\)/);
+  assert.match(adminAppSource, /readFileSync\(resolve\(__dirname,\s*['"]admin-ui\/admin\.html['"]\),\s*['"]utf8['"]\)\)/);
+  assert.match(adminAppSource, /express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\),\s*\{/);
   assert.match(adminHtml, /<title>ChatGPT MCP · Gateway Console<\/title>/);
   assert.match(adminHtml, /type="module" src="\/admin\/main\.ts"/);
 });
@@ -57,18 +59,18 @@ test('admin workspace metadata is loaded for the selected agent', () => {
 });
 
 test('local admin endpoints keep the loopback-only guard', () => {
-  assert.match(serverSource, /function isLocalAdminRequest[\s\S]*?return loopback && !fromCaddy/);
-  assert.match(serverSource, /adminApp\.get\(['"]\/_admin\/totp['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
-  assert.match(serverSource, /adminApp\.post\(['"]\/_admin\/call['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
-  assert.match(serverSource, /adminApp\.use\(['"]\/assets['"],[\s\S]*?express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\)/);
+  assert.match(adminAppSource, /function isLocalAdminRequest[\s\S]*?return loopback && !fromCaddy/);
+  assert.match(adminAppSource, /adminApp\.get\(['"]\/_admin\/totp['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
+  assert.match(adminAppSource, /adminApp\.post\(['"]\/_admin\/call['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
+  assert.match(adminAppSource, /adminApp\.use\(['"]\/assets['"],[\s\S]*?express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\)/);
 });
 
 test('admin runner registers and validates Git subcommand aliases', () => {
   for (const name of ['git_status', 'git_diff', 'git_log', 'git_show', 'git_blame', 'git_branch', 'git_add', 'git_commit']) {
-    assert.ok(serverSource.includes(`${name}: { tool: 'git'`), `Missing ${name} alias`);
+    assert.ok(adminAppSource.includes(`${name}: { tool: 'git'`), `Missing ${name} alias`);
   }
-  assert.match(serverSource, /const git = definitions\.find\(tool => tool\.name === 'git'\)/);
-  assert.match(serverSource, /getAdminToolRegistry\(\)\[alias \? 'git' : tool\]\?\.inputSchema/);
+  assert.match(adminAppSource, /const git = definitions\.find\(tool => tool\.name === 'git'\)/);
+  assert.match(adminAppSource, /getAdminToolRegistry\(\)\[alias \? 'git' : tool\]\?\.inputSchema/);
 });
 
 test('npm test includes the route regression suite', () => {
