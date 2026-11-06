@@ -22,6 +22,26 @@ export class AgentRegistry {
       return { agentId, hostname: metadata?.hostname ?? agentId, os: metadata?.platform === 'win32' ? 'windows' : metadata?.platform === 'linux' ? 'linux' : metadata?.platform ?? 'unknown', platform: metadata?.platform ?? 'unknown', username: metadata?.username ?? 'unknown', workspace: metadata?.workspace ?? 'unknown', version: metadata?.version ?? 'unknown' };
     });
   }
+  async listWithCapabilities() {
+    const agents = this.list();
+    return await Promise.all(agents.map(async agent => {
+      try {
+        const capabilities = await this.call(agent.agentId, 'get_agent_capabilities', {});
+        return { ...agent, capabilities };
+      } catch (error) {
+        return {
+          ...agent,
+          capabilities: {
+            screenshot: { supported: false, detail: 'Unable to probe agent capabilities' },
+            cdp9222: { connected: false, detail: error instanceof Error ? error.message : String(error) },
+            powershell: { available: false, enabled: false, detail: 'Unknown' },
+            bash: { available: false, enabled: false, detail: 'Unknown' },
+            adb: { available: false, connected: false, devices: [], detail: 'Unknown' },
+          },
+        };
+      }
+    }));
+  }
   notifyAgent(agentId: string, message: AgentDiagnostic): boolean {
     const socket = this.get(agentId);
     if (!socket) { this.debug('agent-diagnostic:unavailable', { agentId, tool: message.tool, message: message.message }); return false; }

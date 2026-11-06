@@ -19,7 +19,7 @@ const mcpRoutes = [
 ] as const;
 
 const adminRoutes = [
-  ['GET', '/'], ['GET', '/healthz'], ['GET', '/_admin/totp'], ['POST', '/_admin/call'],
+  ['GET', '/'], ['GET', '/healthz'], ['GET', '/_admin/totp'], ['GET', '/_admin/tools'], ['POST', '/_admin/call'],
 ] as const;
 
 for (const [method, path] of mcpRoutes) {
@@ -41,26 +41,21 @@ for (const [method, path] of adminRoutes) {
 test('root route serves the Vite-built Vue admin entry on adminApp', () => {
   assert.match(serverSource, /adminApp\.get\(['"]\/['"],\s*async\s*\(req,\s*res\)/);
   assert.match(serverSource, /readFileSync\(resolve\(__dirname,\s*['"]admin-ui\/admin\.html['"]\),\s*['"]utf8['"]\)\)/);
-  assert.match(serverSource, /express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\)/);
+  assert.match(serverSource, /express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\),\s*\{/);
   assert.match(adminHtml, /<title>ChatGPT MCP · Gateway Console<\/title>/);
   assert.match(adminHtml, /type="module" src="\/admin\/main\.ts"/);
 });
 
 test('Vue admin component calls the required admin and health endpoints', () => {
   assert.match(adminApp, /requestJson\('\/_admin\/totp'\)/);
-  assert.ok(adminApp.includes("('/healthz')"));
+  assert.match(adminApp, /requestJson<\{agents:Agent\[\]\}>\('\/_admin\/agents'\)/);
+  assert.match(adminApp, /requestJson<\{tools:ToolDefinition\[\]\}>\('\/_admin\/tools'\)/);
   assert.match(adminApp, /requestJson<\{result:unknown\}>\('\/_admin\/call'/);
-  assert.match(adminApp, /runTool\('list_directory'\)/);
-  assert.match(adminApp, /runTool\('read_file'\)/);
-  assert.match(adminApp, /runTool\('write_file'\)/);
 });
 
-test('admin test-tool defaults are derived from the selected agent workspace', () => {
-  assert.match(adminApp, /tool:'get_system_info',args:\{agentId\}/);
+test('admin workspace metadata is loaded for the selected agent', () => {
+  assert.match(adminApp, /tool:'get_system_info',args:\{agentId:selectedAgent\.value/);
   assert.match(adminApp, /workspace\.value=r\.result\.workspace/);
-  assert.match(adminApp, /readPath\.value=`\$\{root\}\$\{separator\}mcp-test\.txt`/);
-  assert.match(adminApp, /writePath\.value=`\$\{root\}\$\{separator\}mcp-created\.txt`/);
-  assert.doesNotMatch(adminApp, /C:\\\\Users\\\\bombl\\\\Desktop/);
   assert.match(adminApp, /watch\(selectedAgent/);
 });
 
@@ -68,4 +63,18 @@ test('local admin endpoints keep the loopback-only guard', () => {
   assert.match(serverSource, /function isLocalAdminRequest[\s\S]*?return loopback && !fromCaddy/);
   assert.match(serverSource, /adminApp\.get\(['"]\/_admin\/totp['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
   assert.match(serverSource, /adminApp\.post\(['"]\/_admin\/call['"],[\s\S]*?if \(!isLocalAdminRequest\(req\)\)/);
+  assert.match(serverSource, /adminApp\.use\(['"]\/assets['"],[\s\S]*?express\.static\(resolve\(__dirname,\s*['"]admin-ui\/assets['"]\)/);
+});
+
+test('admin runner registers and validates Git subcommand aliases', () => {
+  for (const name of ['git_status', 'git_diff', 'git_log', 'git_show', 'git_blame', 'git_branch', 'git_add', 'git_commit']) {
+    assert.ok(serverSource.includes(`${name}: { tool: 'git'`), `Missing ${name} alias`);
+  }
+  assert.match(serverSource, /const git = definitions\.find\(tool => tool\.name === 'git'\)/);
+  assert.match(serverSource, /getAdminToolRegistry\(\)\[alias \? 'git' : tool\]\?\.inputSchema/);
+});
+
+test('npm test includes the route regression suite', () => {
+  const packageJson = JSON.parse(readFileSync(resolve(projectRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+  assert.match(packageJson.scripts?.test ?? '', /tests\/routes\.test\.ts/);
 });

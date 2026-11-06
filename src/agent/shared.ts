@@ -9,6 +9,7 @@ export const MAX_OUTPUT_BYTES = Number(process.env.MAX_OUTPUT_BYTES ?? 1_000_000
 export const MAX_SEARCH_RESULTS = Number(process.env.MAX_SEARCH_RESULTS ?? 500);
 export const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS ?? 120_000);
 let allowCommandExecution = process.env.ALLOW_COMMAND_EXECUTION === 'true';
+export const ALLOW_NPM_EXECUTION = process.env.ALLOW_NPM_EXECUTION === 'true';
 
 /** Set the resolved agent permission (environment or secure configuration). */
 export function setCommandExecutionEnabled(enabled: boolean): void {
@@ -93,6 +94,10 @@ export async function exec(command: string, args: string[], workspaceRoot: strin
 
 export function requireCommandExecution() {
   if (!allowCommandExecution) throw new Error('Command execution is disabled. Set ALLOW_COMMAND_EXECUTION=true on the agent to enable npm tools, run_python, run_node, git, apply_patch, and kill_process.');
+}
+
+export function requireNpmExecution() {
+  if (!allowCommandExecution && !ALLOW_NPM_EXECUTION) throw new Error('Npm execution is disabled. Set ALLOW_NPM_EXECUTION=true (or ALLOW_COMMAND_EXECUTION=true) on the agent to enable npm tools.');
 }
 
 export function appendLimited(current: string, chunk: Buffer | string): { value: string; truncated: boolean } {

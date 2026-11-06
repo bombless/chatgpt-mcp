@@ -1,6 +1,7 @@
 import { createServer as createHttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AgentMessage } from '../shared/protocol.js';
+import { isValidAgentId } from '../shared/agent-id.js';
 import { AgentRegistry } from './agent-registry.js';
 import { createExpressApp } from './express-app.js';
 
@@ -48,7 +49,7 @@ wss.on('connection', ws => {
     try {
       const message = JSON.parse(raw.toString()) as AgentMessage;
       if (message.type === 'hello') {
-        if (!/^[a-zA-Z0-9._-]{1,64}$/.test(message.agentId)) return ws.close(4002, 'invalid agentId');
+        if (!isValidAgentId(message.agentId)) return ws.close(4002, 'invalid agentId');
         const connectedAgentId = message.agentId;
         agentId = connectedAgentId;
         initialized = true;

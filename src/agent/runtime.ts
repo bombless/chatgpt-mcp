@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { assertAllowed, stringArg, exec, requireCommandExecution, appendLimited, COMMAND_TIMEOUT_MS, type CommandLogger } from './shared.js';
+import { assertAllowed, stringArg, exec, requireCommandExecution, requireNpmExecution, appendLimited, COMMAND_TIMEOUT_MS, type CommandLogger } from './shared.js';
 
 type PythonJobStatus = 'running' | 'exited' | 'failed' | 'killed';
 type PythonJob = {
@@ -127,7 +127,7 @@ export function listPythonJobs() {
 }
 
 async function command(name: 'npm' | 'python' | 'node', args: Record<string, unknown>, workspaceRoot: string, logCommand?: CommandLogger) {
-  requireCommandExecution();
+  if (name === 'npm') requireNpmExecution(); else requireCommandExecution();
   const cwd = args.cwd ? stringArg(args, 'cwd') : workspaceRoot;
   const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
 
