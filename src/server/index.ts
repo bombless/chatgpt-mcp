@@ -416,6 +416,8 @@ function buildMcpServer() {
     if (!isValidAgentId(agentId)) throw new Error('Invalid agentId');
     const baseUrl = latestMcpBaseUrl;
     if (!baseUrl) throw new Error('Public URL is unknown; configure PUBLIC_URL or call this tool through the public MCP endpoint first');
+    for (const [key, value] of temporaryUploads) if (value.expiresAt <= Date.now()) temporaryUploads.delete(key);
+    if (temporaryUploads.size >= 10_000) throw new Error('Too many active temporary upload URLs; try again later');
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = Date.now() + TEMPORARY_UPLOAD_TTL_MS;
     temporaryUploads.set(token, { agentId, path, expiresAt });
@@ -448,9 +450,20 @@ app.post('/agent-upload/:token', express.raw({ type: '*/*', limit: TEMPORARY_UPL
   }
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'POST the raw file content as the request body' });
   try {
+    let expectedSha256: string | undefined;
+    try {
+      const current = await registry.call(upload.agentId, 'read_file', {
+        path: upload.path,
+        intent: 'let me check the target file version before saving the uploaded content.',
+      }) as { sha256?: string };
+      if (typeof current.sha256 === 'string') expectedSha256 = current.sha256;
+    } catch {
+      // A missing file is created below; an existing file still requires a matching hash.
+    }
     await registry.call(upload.agentId, 'write_file', {
       path: upload.path,
       content: req.body.toString('utf8'),
+      ...(expectedSha256 ? { expectedSha256 } : {}),
       intent: 'let me save the uploaded content to the requested agent workspace file.',
     });
     temporaryUploads.delete(token);
