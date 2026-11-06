@@ -14,8 +14,8 @@ import { isValidAgentId } from '../shared/agent-id.js';
 import { approve, authorizationPage, exchangeToken, getBaseUrl, oauthMetadata, protectedResourceMetadata, registerClient, validAccessToken } from './oauth.js';
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
-import { applyNativePatch } from './native-patch.js';
-import { listImprovementSuggestions, submitImprovementSuggestion, updateImprovementSuggestion, suggestionCategories, suggestionPriorities, suggestionStatuses } from './improvement-suggestions.js';
+import { suggestionCategories, suggestionPriorities, suggestionStatuses } from './improvement-suggestions.js';
+import { createToolHandlers } from './tool-handlers.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -122,15 +122,13 @@ function buildMcpServer() {
   const commandResultSchema = z.object({ stdout: z.string(), stderr: z.string(), code: z.number().int() });
   const pythonJobSchema = z.object({ jobId: z.string(), pid: z.number().int(), status: z.enum(['running', 'exited', 'failed', 'killed']), command: z.string(), cwd: z.string(), args: z.array(z.string()), startedAt: z.string(), finishedAt: z.string().nullable(), exitCode: z.number().int().nullable(), signal: z.string().nullable(), stdout: z.string(), stderr: z.string(), stdoutTruncated: z.boolean(), stderrTruncated: z.boolean() });
   const input = <const T extends Record<string, z.ZodType>>(shape: T) => z.object({ ...shape, intent: intentSchema });
+  const handlers = createToolHandlers({ registry, resultContent, mcpDebug });
   const codingTool = (name: ToolName, description: string, shape: Record<string, z.ZodType>, outputSchema: z.ZodType) =>
-    server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, async (args: Record<string, unknown>) =>
-      resultContent(await registry.call(String(args.agentId), name, args)));
+    server.registerTool(name, { description, inputSchema: input(shape), outputSchema }, handlers.codingTool(name));
   const npmTool = (name: Extract<ToolName, 'npm_test' | 'npm_run' | 'npm_install' | 'npm_init'>, description: string, argsBuilder: (args: Record<string, unknown>) => string[]) =>
-    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
-      resultContent(await registry.call(agentId, name, { args: argsBuilder({ args }), cwd, intent })));
+    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, handlers.npmTool(name, argsBuilder));
   const gitTool = (name: string, subcommand: string, description: string) =>
-    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, args, cwd, intent }) =>
-      resultContent(await registry.call(agentId, 'git', { args: [subcommand, ...(Array.isArray(args) ? args : [])], cwd, intent })));
+    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, handlers.gitTool(subcommand));
 
   server.registerTool('list_agents', {
     description: 'List connected agents and actively probe screenshot support, local CDP connectivity on 127.0.0.1:9222, PowerShell/Bash availability and execution permission, and authorized ADB devices.',
@@ -151,62 +149,36 @@ function buildMcpServer() {
         adb: z.object({ available: z.boolean(), connected: z.boolean(), devices: z.array(z.string()), detail: z.string() }),
       }),
     })) }),
-  }, async () => resultContent(await registry.listWithCapabilities()));
-  server.registerTool('submit_improvement_suggestion', { description: 'Persist a concrete suggestion for improving this MCP service. Use when actual usage reveals recurring friction, missing capabilities, unclear tool behavior, reliability/performance/usability/security issues, or a valuable enhancement. Include observed context and expected benefit; do not submit generic or speculative suggestions. This records feedback only and does not modify the server.', inputSchema: input({ title: z.string().trim().min(5).max(160), description: z.string().trim().min(10).max(4000), category: z.enum(suggestionCategories), priority: z.enum(suggestionPriorities).default('medium'), source: z.string().trim().max(500).optional() }), outputSchema: z.object({ result: z.object({ suggestion: z.object({ id: z.string(), title: z.string(), status: z.string(), occurrences: z.number().int() }), deduplicated: z.boolean() }) }) }, async ({ title, description, category, priority, source }) => { const result = await submitImprovementSuggestion({ title, description, category, priority, source }); return resultContent({ suggestion: { id: result.suggestion.id, title: result.suggestion.title, status: result.suggestion.status, occurrences: result.suggestion.occurrences }, deduplicated: result.deduplicated }); });
-  server.registerTool('list_improvement_suggestions', { description: 'List persisted MCP improvement suggestions. Filter by status/category to review the backlog and identify recurring priorities.', inputSchema: input({ status: z.enum(suggestionStatuses).optional(), category: z.enum(suggestionCategories).optional(), limit: z.number().int().min(1).max(200).default(50) }), outputSchema: z.object({ result: z.array(z.object({ id: z.string(), title: z.string(), description: z.string(), category: z.string(), priority: z.string(), status: z.string(), created_at: z.number(), updated_at: z.number(), occurrences: z.number().int() })) }) }, async ({ status, category, limit }) => resultContent(await listImprovementSuggestions({ status, category, limit })));
-  server.registerTool('update_improvement_suggestion', { description: 'Update the workflow status of a persisted MCP improvement suggestion. Use only when the user requests backlog maintenance or a status change; this does not implement the suggestion itself.', inputSchema: input({ id: z.string().uuid(), status: z.enum(suggestionStatuses), note: z.string().trim().max(1000).optional() }), outputSchema: z.object({ result: z.object({ id: z.string(), title: z.string(), status: z.string(), updated_at: z.number() }) }) }, async ({ id, status, note }) => { const result = await updateImprovementSuggestion({ id, status, note }); return resultContent({ id: result.id, title: result.title, status: result.status, updated_at: result.updated_at }); });
-  server.registerTool('read_file', { description: 'Read a UTF-8 text file and return its full-content SHA-256. Pass that hash to every subsequent file mutation.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.object({ path: z.string(), content: z.string(), sha256: z.string().length(64), bytes: z.number().int() }) }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'read_file', { path, intent })));
-  server.registerTool('write_file', { description: 'Create a new UTF-8 file, or overwrite an existing file only when expectedSha256 matches the version returned by read_file.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), content: z.string(), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional() }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), sha256Before: z.string().nullable(), sha256After: z.string(), bytesAfter: z.number().int() }) }) }, async ({ agentId, path, content, expectedSha256, intent }) => resultContent(await registry.call(agentId, 'write_file', { path, content, expectedSha256, intent })));
-  server.registerTool('edit_file', { description: 'Replace exact text in a UTF-8 file. expectedSha256 is REQUIRED and must be the full-file hash returned by read_file/read_file_range/tail_file. Fails on stale versions and returns the new hash.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), oldText: z.string().min(1), newText: z.string(), expectedReplacements: z.number().int().min(1).default(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), changed: z.literal(true), replacements: z.number().int(), bytesBefore: z.number().int(), bytesAfter: z.number().int(), sha256Before: z.string(), sha256After: z.string(), diff: z.string() }) }) }, async ({ agentId, path, oldText, newText, expectedReplacements, expectedSha256, intent }) => resultContent(await registry.call(agentId, 'edit_file', { path, oldText, newText, expectedReplacements, expectedSha256, intent })));
-  server.registerTool('list_directory', { description: 'List a directory in the agent workspace.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.array(z.object({ name: z.string(), type: z.enum(['directory', 'file']) })) }) }, async ({ agentId, path, intent }) => resultContent(await registry.call(agentId, 'list_directory', { path, intent })));
-  server.registerTool('move_file', { description: 'Move or rename a file only when expectedSha256 matches the source file version returned by a read tool. Destination must not exist.', inputSchema: input({ agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), source: z.string(), destination: z.string(), sha256: z.string() }) }) }, async ({ agentId, source, destination, expectedSha256, intent }) => resultContent(await registry.call(agentId, 'move_file', { source, destination, expectedSha256, intent })));
-  server.registerTool('delete_file', { description: 'Delete a file only when expectedSha256 matches the file version returned by a read tool.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), sha256Before: z.string() }) }) }, async ({ agentId, path, expectedSha256, intent }) => resultContent(await registry.call(agentId, 'delete_file', { path, expectedSha256, intent })));
-  server.registerTool('execute_powershell', { description: 'Execute PowerShell 7.1 on Windows. Agent policy may disable it.', inputSchema: input({ agentId: agentIdSchema, command: z.string().min(1) }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, command, intent }) => resultContent(await registry.call(agentId, 'execute_powershell', { command, intent })));
-  server.registerTool('execute_bash', { description: 'Execute Bash on a Linux agent. Agent policy may disable it.', inputSchema: input({ agentId: agentIdSchema, command: z.string().min(1) }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, command, intent }) => resultContent(await registry.call(agentId, 'execute_bash', { command, intent })));
+  }, handlers.listAgents);
+  server.registerTool('submit_improvement_suggestion', { description: 'Persist a concrete suggestion for improving this MCP service. Use when actual usage reveals recurring friction, missing capabilities, unclear tool behavior, reliability/performance/usability/security issues, or a valuable enhancement. Include observed context and expected benefit; do not submit generic or speculative suggestions. This records feedback only and does not modify the server.', inputSchema: input({ title: z.string().trim().min(5).max(160), description: z.string().trim().min(10).max(4000), category: z.enum(suggestionCategories), priority: z.enum(suggestionPriorities).default('medium'), source: z.string().trim().max(500).optional() }), outputSchema: z.object({ result: z.object({ suggestion: z.object({ id: z.string(), title: z.string(), status: z.string(), occurrences: z.number().int() }), deduplicated: z.boolean() }) }) }, handlers.submitImprovementSuggestion);
+  server.registerTool('list_improvement_suggestions', { description: 'List persisted MCP improvement suggestions. Filter by status/category to review the backlog and identify recurring priorities.', inputSchema: input({ status: z.enum(suggestionStatuses).optional(), category: z.enum(suggestionCategories).optional(), limit: z.number().int().min(1).max(200).default(50) }), outputSchema: z.object({ result: z.array(z.object({ id: z.string(), title: z.string(), description: z.string(), category: z.string(), priority: z.string(), status: z.string(), created_at: z.number(), updated_at: z.number(), occurrences: z.number().int() })) }) }, handlers.listImprovementSuggestions);
+  server.registerTool('update_improvement_suggestion', { description: 'Update the workflow status of a persisted MCP improvement suggestion. Use only when the user requests backlog maintenance or a status change; this does not implement the suggestion itself.', inputSchema: input({ id: z.string().uuid(), status: z.enum(suggestionStatuses), note: z.string().trim().max(1000).optional() }), outputSchema: z.object({ result: z.object({ id: z.string(), title: z.string(), status: z.string(), updated_at: z.number() }) }) }, handlers.updateImprovementSuggestion);
+  server.registerTool('read_file', { description: 'Read a UTF-8 text file and return its full-content SHA-256. Pass that hash to every subsequent file mutation.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.object({ path: z.string(), content: z.string(), sha256: z.string().length(64), bytes: z.number().int() }) }) }, handlers.readFile);
+  server.registerTool('write_file', { description: 'Create a new UTF-8 file, or overwrite an existing file only when expectedSha256 matches the version returned by read_file.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), content: z.string(), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional() }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), sha256Before: z.string().nullable(), sha256After: z.string(), bytesAfter: z.number().int() }) }) }, handlers.writeFile);
+  server.registerTool('edit_file', { description: 'Replace exact text in a UTF-8 file. expectedSha256 is REQUIRED and must be the full-file hash returned by read_file/read_file_range/tail_file. Fails on stale versions and returns the new hash.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), oldText: z.string().min(1), newText: z.string(), expectedReplacements: z.number().int().min(1).default(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), changed: z.literal(true), replacements: z.number().int(), bytesBefore: z.number().int(), bytesAfter: z.number().int(), sha256Before: z.string(), sha256After: z.string(), diff: z.string() }) }) }, handlers.editFile);
+  server.registerTool('list_directory', { description: 'List a directory in the agent workspace.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }), outputSchema: z.object({ result: z.array(z.object({ name: z.string(), type: z.enum(['directory', 'file']) })) }) }, handlers.listDirectory);
+  server.registerTool('move_file', { description: 'Move or rename a file only when expectedSha256 matches the source file version returned by a read tool. Destination must not exist.', inputSchema: input({ agentId: agentIdSchema, source: z.string().min(1), destination: z.string().min(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), source: z.string(), destination: z.string(), sha256: z.string() }) }) }, handlers.moveFile);
+  server.registerTool('delete_file', { description: 'Delete a file only when expectedSha256 matches the file version returned by a read tool.', inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1), expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/) }), outputSchema: z.object({ result: z.object({ ok: z.literal(true), path: z.string(), sha256Before: z.string() }) }) }, handlers.deleteFile);
+  server.registerTool('execute_powershell', { description: 'Execute PowerShell 7.1 on Windows. Agent policy may disable it.', inputSchema: input({ agentId: agentIdSchema, command: z.string().min(1) }), outputSchema: z.object({ result: commandResultSchema }) }, handlers.executePowershell);
+  server.registerTool('execute_bash', { description: 'Execute Bash on a Linux agent. Agent policy may disable it.', inputSchema: input({ agentId: agentIdSchema, command: z.string().min(1) }), outputSchema: z.object({ result: commandResultSchema }) }, handlers.executeBash);
 
   server.registerTool('get_proxy_info', {
     description: 'Get proxy settings from the Agent process environment.',
     inputSchema: input({ agentId: agentIdSchema }),
     outputSchema: z.object({ result: z.unknown() }),
-  }, async ({ agentId, intent }) =>
-    resultContent(await registry.call(agentId, 'get_proxy_info', { intent }))
-  );
-  server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_system_info', { intent })));
+  }, handlers.getProxyInfo);
+  server.registerTool('get_system_info', { description: 'Get basic system information for the agent machine.', inputSchema: input({ agentId: agentIdSchema }), outputSchema: z.object({ result: z.object({ hostname: z.string(), platform: z.string(), arch: z.string(), release: z.string(), workspace: z.string(), commandExecutionEnabled: z.boolean() }) }) }, handlers.getSystemInfo);
 
   server.registerTool('read_image_file', {
     description: 'Read a JPEG or PNG image from an absolute path on the connected agent and return it as a native MCP image block. The resolved file must be inside AGENT_WORKSPACE; maximum size is 20 MiB.',
     inputSchema: input({ agentId: agentIdSchema, path: z.string().min(1) }),
-  }, async ({ agentId, path: imagePath, intent }) => {
-    try {
-      const image = await registry.call(agentId, 'read_image_file', { path: imagePath, intent }) as {
-        path: string; mimeType: string; data: string; dataBytes: number; dataSha256: string;
-      };
-      if (!image || !image.data || !['image/jpeg', 'image/png'].includes(image.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(image.data)) {
-        throw new Error('Agent returned invalid image data');
-      }
-      const bytes = Buffer.from(image.data, 'base64');
-      if (bytes.length !== image.dataBytes || bytes.length > 20 * 1024 * 1024) throw new Error('Image byte length is invalid or exceeds 20 MiB');
-      const validJpeg = image.mimeType === 'image/jpeg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-      const validPng = image.mimeType === 'image/png' && bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-      if (!validJpeg && !validPng) throw new Error('Image content does not match its declared JPEG/PNG MIME type');
-      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-      if (digest !== image.dataSha256) throw new Error('Image SHA-256 mismatch');
-      return { content: [
-        { type: 'text' as const, text: JSON.stringify({ path: image.path, mimeType: image.mimeType, dataBytes: image.dataBytes, dataSha256: digest }, null, 2) },
-        { type: 'image' as const, data: image.data, mimeType: image.mimeType },
-      ] };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'read_image_file', message });
-      throw new Error(`read_image_file failed: ${message}`);
-    }
-  });
+  }, handlers.readImageFile);
 
   server.registerTool('get_screen_info', {
     description: 'List every attached display/monitor, including stable index, device name, bounds, resolution, primary status, and virtual desktop coordinates.',
     inputSchema: input({ agentId: agentIdSchema }),
     outputSchema: z.object({ result: z.object({ platform: z.string(), screens: z.array(z.object({ index: z.number().int(), deviceName: z.string(), x: z.number().int(), y: z.number().int(), width: z.number().int(), height: z.number().int(), primary: z.boolean() })) }) }),
-  }, async ({ agentId, intent }) => resultContent(await registry.call(agentId, 'get_screen_info', { intent })));
+  }, handlers.getScreenInfo);
 
   codingTool('get_screen_pixel', 'Probe exactly one screen pixel and return numeric 8-bit RGB channels plus hex; avoids sending screenshot images into model context. Coordinates x/y are zero-based and relative to the selected display; call get_screen_info first to choose screenIndex and learn its dimensions.', {
     agentId: agentIdSchema,
@@ -218,34 +190,7 @@ function buildMcpServer() {
   server.registerTool('take_adb_screenshot', {
     description: 'Capture the connected Android phone screen through Android Debug Bridge (ADB) and return the PNG as a native MCP image block. If exactly one authorized device is connected, serial may be omitted; when multiple devices are connected, specify serial from adb devices. Requires adb installed and USB debugging enabled/authorized on the phone.',
     inputSchema: input({ agentId: agentIdSchema, serial: z.string().trim().min(1).optional() }),
-  }, async ({ agentId, serial, intent }) => {
-    try {
-      const image = await registry.call(agentId, 'take_adb_screenshot', { serial, intent }) as {
-        serial: string; mimeType: string; width: number; height: number; data: string; dataBytes: number; dataSha256: string;
-      };
-      if (!image || image.mimeType !== 'image/png' || !image.data || !/^[A-Za-z0-9+/]+={0,2}$/u.test(image.data)) {
-        throw new Error('Agent returned invalid ADB screenshot image data');
-      }
-      const bytes = Buffer.from(image.data, 'base64');
-      const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-      if (bytes.length !== image.dataBytes || bytes.length > 20 * 1024 * 1024 || bytes.length < 24 || !bytes.subarray(0, 8).equals(pngSignature)) {
-        throw new Error('ADB screenshot PNG byte length/signature is invalid or exceeds 20 MiB');
-      }
-      const width = bytes.readUInt32BE(16);
-      const height = bytes.readUInt32BE(20);
-      if (width !== image.width || height !== image.height || width < 1 || height < 1) throw new Error('ADB screenshot dimensions do not match PNG metadata');
-      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-      if (digest !== image.dataSha256) throw new Error('ADB screenshot SHA-256 mismatch');
-      return { content: [
-        { type: 'text' as const, text: JSON.stringify({ serial: image.serial, mimeType: image.mimeType, width, height, dataBytes: bytes.length, dataSha256: digest }, null, 2) },
-        { type: 'image' as const, data: image.data, mimeType: 'image/png' },
-      ] };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'take_adb_screenshot', message });
-      throw new Error(`take_adb_screenshot failed: ${message}`);
-    }
-  });
+  }, handlers.takeAdbScreenshot);
 
   server.registerTool('take_screenshot', {
     description: 'Capture screenshots as real MCP image blocks, JPEG limited to 1000x1000 pixels. By default captures all monitors; pass screenIndex to select one. To reduce image payload, optionally provide x, y, width, height together to crop a region relative to that display (requires screenIndex). Pass highlightCursor=true to visually emphasize the mouse cursor position on the captured image. Returns current mouse cursor coordinates. Call get_screen_info for display indices and bounds.',
@@ -258,46 +203,7 @@ function buildMcpServer() {
       height: z.number().int().min(1).optional(),
       highlightCursor: z.boolean().optional(),
     }),
-  }, async ({ agentId, screenIndex, x, y, width, height, highlightCursor, intent }) => {
-    try {
-    const captured = await registry.call(agentId, 'take_screenshot', { screenIndex, x, y, width, height, highlightCursor, intent }) as {
-      cursor?: { x: number; y: number; screenIndex: number | null; relativeX: number | null; relativeY: number | null } | null;
-      screens: Array<{ index: number; deviceName: string; width: number; height: number; mimeType: string; data: string; dataBytes: number; dataSha256: string; x: number; y: number; primary: boolean }>;
-    };
-    if (!captured || !Array.isArray(captured.screens) || captured.screens.length === 0) throw new Error('Agent returned an invalid or empty screenshot response');
-    if (captured.screens.some(screen => !screen.data || !/^image\/(png|jpeg|webp)$/u.test(screen.mimeType) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(screen.data))) {
-      throw new Error('Agent returned invalid screenshot image data');
-    }
-    for (const screen of captured.screens) {
-      if (screen.mimeType !== 'image/jpeg' || screen.width > 1000 || screen.height > 1000 || screen.width < 1 || screen.height < 1) throw new Error(`Screenshot metadata violates JPEG/1000x1000 constraints for display ${screen.index}`);
-      const bytes = Buffer.from(screen.data, 'base64');
-      if (bytes.length !== screen.dataBytes) throw new Error(`Screenshot byte length mismatch for display ${screen.index}: expected=${screen.dataBytes}, received=${bytes.length}`);
-      if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) throw new Error(`Screenshot JPEG integrity check failed for display ${screen.index}`);
-      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-      if (digest !== screen.dataSha256) throw new Error(`Screenshot SHA-256 mismatch for display ${screen.index}`);
-      mcpDebug('screenshot:integrity-ok', { agentId, screenIndex: screen.index, width: screen.width, height: screen.height, bytes: bytes.length, sha256: digest });
-    }
-    const content = [
-      {
-        type: 'text' as const,
-        text: JSON.stringify({
-          cursor: captured.cursor ?? null,
-          count: captured.screens.length,
-          screens: captured.screens.map(({ data, ...metadata }) => metadata),
-        }, null, 2),
-      },
-      ...captured.screens.map(screen => ({ type: 'image' as const, data: screen.data, mimeType: screen.mimeType })),
-    ];
-    // Do not return structuredContent for screenshots: clients may prioritize it
-    // over content and consequently discard the actual MCP image blocks.
-    return { content };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const notified = registry.notifyAgent(agentId, { type: 'server_diagnostic', level: 'error', tool: 'take_screenshot', message });
-      console.error(`[mcp][screenshot][error] agentId=${agentId} notifiedAgent=${notified}: ${message}`);
-      throw new Error(`take_screenshot failed: ${message}`);
-    }
-  });
+  }, handlers.takeScreenshot);
 
   codingTool('click_mouse', 'Click or double-click the mouse at specified coordinates or current cursor position. If screenIndex is provided, x and y are relative to that display; otherwise they are absolute virtual-desktop coordinates. If x and y are omitted, clicks at current cursor position.', {
     agentId: agentIdSchema,
@@ -363,8 +269,7 @@ function buildMcpServer() {
   npmTool('npm_install', 'Install npm dependencies with `npm install`. Extra arguments are passed directly to npm install.', ({ args }) => ['install', ...(Array.isArray(args) ? args.map(String) : [])]);
   npmTool('npm_init', 'Initialize a package with `npm init`. Extra arguments are passed directly to npm init.', ({ args }) => ['init', ...(Array.isArray(args) ? args.map(String) : [])]);
   const gradleTool = (name: Extract<ToolName, 'gradle_assemble_debug' | 'gradle_install_debug'>, task: 'assembleDebug' | 'installDebug', description: string) =>
-    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, async ({ agentId, cwd, intent }) =>
-      resultContent(await registry.call(agentId, name, { cwd, intent })));
+    server.registerTool(name, { description, inputSchema: input({ agentId: agentIdSchema, cwd: cwdSchema }), outputSchema: z.object({ result: commandResultSchema }) }, handlers.gradleTool(name));
   gradleTool('gradle_assemble_debug', 'assembleDebug', 'Run `gradle assembleDebug` in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.');
   gradleTool('gradle_install_debug', 'installDebug', 'Run `gradle installDebug` in the workspace. Requires ALLOW_COMMAND_EXECUTION=true.');
   codingTool('run_python', 'Run Python with arguments in the workspace. By default waits for completion with COMMAND_TIMEOUT_MS; set async=true to start a background Python job and receive a jobId. Requires ALLOW_COMMAND_EXECUTION=true.', { agentId: agentIdSchema, args: z.array(z.string()).default([]), cwd: cwdSchema, async: z.boolean().default(false) }, z.object({ result: z.union([commandResultSchema, z.object({ jobId: z.string(), pid: z.number().int(), status: z.literal('running'), command: z.string(), cwd: z.string(), startedAt: z.string() })]) }));
@@ -389,14 +294,7 @@ function buildMcpServer() {
   gitTool('git_branch', 'branch', 'Inspect or manage branches with `git branch`. Do not use it to discard working-tree changes.');
   gitTool('git_add', 'add', 'Stage explicitly selected files with `git add`.');
   gitTool('git_commit', 'commit', 'Create a Git commit with `git commit`.');
-  server.registerTool('apply_patch', { description: 'Apply a Codex-style patch with mandatory expectedSha256ByPath entries for every changed file. Use full-file hashes from read tools; use __missing__ only for Add File operations.', inputSchema: input({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema, expectedSha256ByPath: z.record(z.string(), z.string().regex(/^(?:[a-fA-F0-9]{64}|__missing__)$/)) }), outputSchema: z.object({ result: z.unknown() }) }, async ({ agentId, patch, cwd, expectedSha256ByPath, intent }) => {
-    const patchPath = (value: string) => cwd ? `${cwd.replace(/[\\/]+$/, '')}\\${value.replaceAll('/', '\\')}` : value;
-    return resultContent(await applyNativePatch(patch, {
-      editFile: async (path, oldText, newText, expectedSha256) => registry.call(agentId, 'edit_file', { path: patchPath(path), oldText, newText, expectedReplacements: 1, expectedSha256, intent }),
-      writeFile: async (path, content, expectedSha256) => registry.call(agentId, 'write_file', { path: patchPath(path), content, expectedSha256: expectedSha256 === '__missing__' ? undefined : expectedSha256, intent }),
-      deleteFile: async (path, expectedSha256) => registry.call(agentId, 'delete_file', { path: patchPath(path), expectedSha256, intent }),
-    }, expectedSha256ByPath));
-  });
+  server.registerTool('apply_patch', { description: 'Apply a Codex-style patch with mandatory expectedSha256ByPath entries for every changed file. Use full-file hashes from read tools; use __missing__ only for Add File operations.', inputSchema: input({ agentId: agentIdSchema, patch: z.string().min(1), cwd: cwdSchema, expectedSha256ByPath: z.record(z.string(), z.string().regex(/^(?:[a-fA-F0-9]{64}|__missing__)$/)) }), outputSchema: z.object({ result: z.unknown() }) }, handlers.applyPatch);
   codingTool('find_files', 'Find workspace files using an rg glob pattern.', { agentId: agentIdSchema, pattern: z.string().default('**/*'), cwd: cwdSchema, maxResults: z.number().int().min(1).max(5000).default(500) }, z.object({ result: z.object({ files: z.array(z.string()), truncated: z.boolean(), count: z.number().int() }) }));
   codingTool('cdp_version', 'Get the Chrome DevTools Protocol version from the Windows agent local browser at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.record(z.string(), z.unknown()) }));
   codingTool('cdp_list_targets', 'List browser tabs/targets exposed by the agent local CDP endpoint at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.array(z.object({ id: z.string(), type: z.string().optional(), title: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional() })) }));
