@@ -266,7 +266,7 @@ npm run test:coding
 npm run test:tool-usage
 ```
 
-Run the gateway with `npm run dev` and the agent with `npm run agent`. The agent detects the operating system automatically; no `--linux` flag is needed.
+Run the gateway with `npm run dev` and the agent separately with `npm run agent`. To run both roles in one Node.js process, use `npm start -- --agent`; the launcher waits for the gateway health endpoint before connecting the embedded agent. See [Embedded server + agent mode](docs/embedded-agent.md) for configuration details. The agent detects the operating system automatically; no `--linux` flag is needed.
 
 ## Security notes
 
