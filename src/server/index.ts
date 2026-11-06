@@ -101,6 +101,13 @@ class AgentRegistry {
   handleMessage(message: AgentMessage) { if (message.type !== 'response') return; const response = message as AgentResponse; const item = this.pending.get(response.id); if (!item) { mcpDebug('agent-response:orphan', { requestId: response.id }); return; } this.pending.delete(response.id); if (response.ok) item.resolve(response.result); else item.reject(new Error(response.error ?? 'Agent request failed')); }
 }
 const registry = new AgentRegistry();
+
+type TemporaryUpload = { agentId: string; path: string; expiresAt: number };
+const temporaryUploads = new Map<string, TemporaryUpload>();
+const TEMPORARY_UPLOAD_TTL_MS = 10 * 60 * 1000;
+const TEMPORARY_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+let latestMcpBaseUrl = PUBLIC_URL;
+
 function resultContent(value: unknown) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   const time = `${new Date().getHours().toString().padStart(2, '0')}:${new Date().getMinutes().toString().padStart(2, '0')}`;
@@ -401,6 +408,20 @@ function buildMcpServer() {
   codingTool('cdp_version', 'Get the Chrome DevTools Protocol version from the Windows agent local browser at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.record(z.string(), z.unknown()) }));
   codingTool('cdp_list_targets', 'List browser tabs/targets exposed by the agent local CDP endpoint at 127.0.0.1:9222.', { agentId: agentIdSchema }, z.object({ result: z.array(z.object({ id: z.string(), type: z.string().optional(), title: z.string().optional(), url: z.string().optional(), webSocketDebuggerUrl: z.string().optional() })) }));
   codingTool('cdp_call', 'Call a Chrome DevTools Protocol method on a browser target exposed by 127.0.0.1:9222. The agent only connects to this fixed local CDP endpoint; targetId comes from cdp_list_targets.', { agentId: agentIdSchema, targetId: z.string().min(1).describe('CDP target id from cdp_list_targets'), method: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), timeoutMs: z.number().int().min(1000).max(120000).optional() }, z.object({ result: z.record(z.string(), z.unknown()) }));
+  server.registerTool('create_temporary_file_upload_url', {
+    description: 'Create a one-time HTTP POST URL for uploading UTF-8 content to a file in the specified agent workspace. The URL expires after 10 minutes and is consumed only after a successful write. POST the raw file content as the request body.',
+    inputSchema: input({ agentId: agentIdSchema, path: z.string().trim().min(1).max(4096) }),
+    outputSchema: z.object({ result: z.object({ url: z.string().url(), method: z.literal('POST'), expiresAt: z.string(), maxBytes: z.number().int() }) }),
+  }, async ({ agentId, path }) => {
+    if (!isValidAgentId(agentId)) throw new Error('Invalid agentId');
+    const baseUrl = latestMcpBaseUrl;
+    if (!baseUrl) throw new Error('Public URL is unknown; configure PUBLIC_URL or call this tool through the public MCP endpoint first');
+    const token = crypto.randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + TEMPORARY_UPLOAD_TTL_MS;
+    temporaryUploads.set(token, { agentId, path, expiresAt });
+    return resultContent({ url: `${baseUrl}/agent-upload/${token}`, method: 'POST', expiresAt: new Date(expiresAt).toISOString(), maxBytes: TEMPORARY_UPLOAD_MAX_BYTES });
+  });
+
   return server;
 }
 
@@ -416,6 +437,27 @@ app.use((req, res, next) => {
     return;
   }
   next();
+});
+app.post('/agent-upload/:token', express.raw({ type: '*/*', limit: TEMPORARY_UPLOAD_MAX_BYTES }), async (req, res) => {
+  const token = req.params.token;
+  const upload = temporaryUploads.get(token);
+  if (!upload) return res.status(404).json({ error: 'Upload URL not found or already used' });
+  if (upload.expiresAt <= Date.now()) {
+    temporaryUploads.delete(token);
+    return res.status(410).json({ error: 'Upload URL expired' });
+  }
+  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'POST the raw file content as the request body' });
+  try {
+    await registry.call(upload.agentId, 'write_file', {
+      path: upload.path,
+      content: req.body.toString('utf8'),
+      intent: 'let me save the uploaded content to the requested agent workspace file.',
+    });
+    temporaryUploads.delete(token);
+    return res.status(201).json({ ok: true, agentId: upload.agentId, path: upload.path, bytes: req.body.length });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
 });
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
@@ -559,6 +601,7 @@ const toBuffer = (chunk: unknown) => {
 
 const mcpHandler = toNodeHandler(createMcpHandler(buildMcpServer));
 app.all('/mcp', async (req, res) => {
+  latestMcpBaseUrl = PUBLIC_URL ?? getBaseUrl(req);
   if (!await mcpAuthorized(req)) return mcpUnauthorized(res, req);
   mcpDebug('handler:dispatch', { method: req.method, contentType: req.get('content-type'), accept: req.get('accept'), bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined });
   try {
