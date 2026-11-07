@@ -78,3 +78,13 @@ export type ToolName =
   | 'cdp_version'
   | 'cdp_list_targets'
   | 'cdp_call';
+
+export type AgentMetadata = {
+  hostname: string;
+  platform: string;
+  username: string;
+  workspace: string;
+  version: string;
+};
+
+export type LocalAgentHandler = (request: AgentRequest) => Promise<unknown>;
