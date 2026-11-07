@@ -35,7 +35,9 @@ export type AgentMessage = AgentHello | AgentResponse;
 
 export type ToolName =
   | 'read_file'
+  | 'read_file_bytes'
   | 'write_file'
+  | 'write_file_bytes'
   | 'edit_file'
   | 'list_directory'
   | 'move_file'

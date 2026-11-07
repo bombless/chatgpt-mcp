@@ -74,6 +74,19 @@ test('admin runner registers and validates Git subcommand aliases', () => {
   assert.match(serverSource, /getAdminToolRegistry\(\)\[alias \? 'git' : tool\]\?\.inputSchema/);
 });
 
+test('one-time binary transfer routes are registered before body parsers', () => {
+  assert.match(serverSource, /app\.get\(['"]\/mcp\/file\/:token['"]/);
+  assert.match(serverSource, /app\.post\(['"]\/mcp\/file\/:token['"],\s*express\.raw\(\{ type: ['"]\*\/\*['"], limit: ['"]32mb['"] \}\)/);
+  assert.ok(serverSource.indexOf("app.get('/mcp/file/:token'") < serverSource.indexOf('app.use(express.json'));
+  const tools = readFileSync(resolve(projectRoot, 'src/server/mcp-server.ts'), 'utf8');
+  assert.match(tools, /registerTool\('create_file_download_url'/);
+  assert.match(tools, /registerTool\('create_file_upload_url'/);
+  assert.match(tools, /\$\{getBaseUrl\(\)\}\/mcp\/file\//);
+  const oauth = readFileSync(resolve(projectRoot, 'src/server/oauth.ts'), 'utf8');
+  assert.match(oauth, /const PUBLIC_URL = \(process\.env\.PUBLIC_URL \?\? 'https:\/\/bombless\.duckdns\.org'\)/);
+  assert.match(oauth, /return PUBLIC_URL;/);
+});
+
 test('npm test includes the route regression suite', () => {
   const packageJson = JSON.parse(readFileSync(resolve(projectRoot, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
   assert.match(packageJson.scripts?.test ?? '', /tests\/routes\.test\.ts/);

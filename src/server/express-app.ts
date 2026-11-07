@@ -14,6 +14,7 @@ import { approve, authorizationPage, exchangeToken, getBaseUrl, oauthMetadata, p
 import { getDb, saveDb } from './db.js';
 import { otpauthUri, randomBase32 } from './totp.js';
 import { buildMcpServer } from './mcp-server.js';
+import { consumeFileTransfer } from './file-transfer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -43,6 +44,31 @@ app.use((req, res, next) => {
     return;
   }
   next();
+});
+// Raw binary capability endpoints must run before JSON/form body parsers.
+app.get('/mcp/file/:token', async (req, res) => {
+  const transfer = consumeFileTransfer(req.params.token, 'GET');
+  if (!transfer) return res.status(410).send('Transfer URL is invalid, expired, or already used.');
+  try {
+    const result = await registry.call(transfer.agentId, 'read_file_bytes', { path: transfer.path });
+    const data = (result as { data?: unknown })?.data;
+    if (typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data)) throw new Error('Agent returned an invalid binary payload');
+    const bytes = Buffer.from(data, 'base64');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(bytes.length));
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(bytes);
+  } catch (error) { res.status(502).type('text').send(error instanceof Error ? error.message : String(error)); }
+});
+app.post('/mcp/file/:token', express.raw({ type: '*/*', limit: '32mb' }), async (req, res) => {
+  const transfer = consumeFileTransfer(req.params.token, 'POST');
+  if (!transfer) return res.status(410).send('Transfer URL is invalid, expired, or already used.');
+  if (!Buffer.isBuffer(req.body)) return res.status(400).send('Request body must contain raw binary bytes.');
+  try {
+    const result = await registry.call(transfer.agentId, 'write_file_bytes', { path: transfer.path, data: req.body.toString('base64') });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result);
+  } catch (error) { res.status(502).type('text').send(error instanceof Error ? error.message : String(error)); }
 });
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));

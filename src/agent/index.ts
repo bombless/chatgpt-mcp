@@ -71,6 +71,30 @@ getConfig().then(config => {
         const bytes = await fs.readFile(file)
         return { path: file, content: bytes.toString('utf8'), sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length }
       }
+      case 'read_file_bytes': {
+        const requested = assertAllowed(String(request.args.path), 'read_file_bytes')
+        const file = await fs.realpath(requested)
+        assertAllowed(file, 'read_file_bytes')
+        const stat = await fs.stat(file)
+        if (!stat.isFile()) throw new Error(`Path is not a regular file: ${file}`)
+        if (stat.size > 32 * 1024 * 1024) throw new Error('File exceeds the 32 MiB transfer limit')
+        return { path: file, data: (await fs.readFile(file)).toString('base64') }
+      }
+      case 'write_file_bytes': {
+        const requested = assertAllowed(String(request.args.path), 'write_file_bytes')
+        const parent = await fs.realpath(path.dirname(requested))
+        assertAllowed(parent, 'write_file_bytes')
+        const file = path.join(parent, path.basename(requested))
+        try { assertAllowed(await fs.realpath(file), 'write_file_bytes') } catch (error: any) { if (error.code !== 'ENOENT') throw error }
+        const encoded = String(request.args.data ?? '')
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) throw new Error('Invalid base64 file payload')
+        const bytes = Buffer.from(encoded, 'base64')
+        if (bytes.length > 32 * 1024 * 1024) throw new Error('File exceeds the 32 MiB transfer limit')
+        const temporary = path.join(parent, `.${path.basename(file)}.transfer-${crypto.randomUUID()}.tmp`)
+        try { await fs.writeFile(temporary, bytes, { flag: 'wx' }); await fs.rename(temporary, file) }
+        finally { await fs.rm(temporary, { force: true }) }
+        return { ok: true, path: file, bytesAfter: bytes.length, sha256After: crypto.createHash('sha256').update(bytes).digest('hex') }
+      }
       case 'write_file': {
         const file = assertAllowed(String(request.args.path), 'write_file')
         const content = String(request.args.content)

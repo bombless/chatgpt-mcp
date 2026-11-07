@@ -29,10 +29,7 @@ export function getBaseUrl(req?: Request): string {
       return `${proto}://${host}`.replace(/\/$/, '');
     }
   }
-  if (process.env.PUBLIC_URL) {
-    return process.env.PUBLIC_URL.replace(/\/$/, '');
-  }
-  return `http://127.0.0.1:${process.env.PORT ?? 8787}`;
+  return PUBLIC_URL;
 }
 
 export function oauthMetadata(baseUrl?: string) {
