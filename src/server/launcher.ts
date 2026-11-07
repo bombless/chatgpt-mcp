@@ -43,12 +43,14 @@ if (!localMode && !embeddedAgentMode) {
   await import('./index.js');
 
   if (embeddedAgentMode) {
-    // Start the in-process agent only after the gateway is accepting requests.
-    // It uses the exact same authenticated WebSocket endpoint as a remote agent.
+    // True in-process agent: register a local handler on the gateway registry.
+    // Tool calls invoke the agent directly — no WebSocket, no JSON hop, no IPC.
     await waitForServer(internalPort);
-    process.env.SERVER_URL = `ws://127.0.0.1:${internalPort}/agent`;
-    console.log('[launcher] starting embedded agent in this process');
-    await import('../agent/index.js');
+    process.env.EMBEDDED_AGENT = '1';
+    console.log('[launcher] starting embedded agent in this process (zero-IPC)');
+    const { registry } = await import('./index.js');
+    const { startLocalAgent } = await import('../agent/index.js');
+    await startLocalAgent(registry);
   }
 
   if (localMode) {
